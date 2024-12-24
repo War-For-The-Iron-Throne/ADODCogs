@@ -1,3 +1,4 @@
+import json
 import discord
 from discord.ui import View, Button
 from redbot.core import commands
@@ -15,13 +16,81 @@ import re
 def chunk_embeds(embeds: list[discord.Embed], size=10) -> list[list[discord.Embed]]:
     """
     Discord only allows up to 10 embeds in a single message.
-    We split a large list of embed objects into sub-lists of up to 'size'.
-    Each sub-list is one 'page'.
+    We split a list of Embeds into sub-lists of up to 'size'.
+    Each sub-list is one "page" in the paginator.
     """
     pages = []
     for i in range(0, len(embeds), size):
         pages.append(embeds[i : i + size])
     return pages
+
+def ensure_under_6000(embed: discord.Embed) -> bool:
+    """
+    Check if a single embed's total size (title + description + fields + etc.)
+    might exceed Discord's 6000-character limit.
+
+    We'll convert the embed to a dict and measure its JSON length
+    as a rough proxy. This is slightly more strict than needed, but safe.
+    """
+    try:
+        embed_dict = embed.to_dict()
+        json_str = json.dumps(embed_dict)
+        return len(json_str) <= 6000
+    except Exception:
+        # If something goes wrong converting, err on the side of "unsafe"
+        return False
+
+def build_safe_embeds(section_name: str, content: str) -> list[discord.Embed]:
+    """
+    Safely create multiple embeds from a single large text block (content).
+    Each embed will contain a *single field*, ensuring:
+      - Field value <= 1024
+      - Total embed size <= 6000
+      - We also sanitize triple-backticks to avoid weird expansions
+    """
+    content = content.strip()
+    if not content:
+        return []
+
+    # Replace triple backticks with something safer
+    # so we don't cause embedded code blocks in code blocks.
+    safe_text = content.replace("```", "'''")
+
+    # We'll start with a chunk size that comfortably fits in a single field.
+    # If your text is extremely large, we'll keep chunking until < 1024.
+    chunk_size = 1000
+
+    # Break the text into 1000-character pieces (just below the 1024 field limit).
+    # If this STILL ends up making an embed that is too big (rare), we'll reduce further.
+    chunks = [safe_text[i : i + chunk_size] for i in range(0, len(safe_text), chunk_size)]
+
+    embeds = []
+    for idx, chunk_text in enumerate(chunks, start=1):
+        # For the first chunk, embed title = section_name, otherwise blank
+        embed_title = section_name if idx == 1 else ""
+        embed = discord.Embed(title=embed_title, color=discord.Color.blue())
+
+        # We'll wrap the chunk in triple backticks
+        field_value = f"```{chunk_text}```"
+
+        embed.add_field(name="\u200b", value=field_value, inline=False)
+
+        # If for some reason it's still too large, we keep chopping it down
+        # until it fits under the 6000 limit (very rare scenario).
+        while not ensure_under_6000(embed) and len(chunk_text) > 50:
+            # Reduce chunk_text further
+            chunk_text = chunk_text[: len(chunk_text) // 2]
+            embed.clear_fields()  # Remove existing fields
+            field_value = f"```{chunk_text}```"
+            embed.add_field(name="\u200b", value=field_value, inline=False)
+
+        # If we STILL can't fit, we give up on this chunk and skip it
+        if not ensure_under_6000(embed):
+            continue
+
+        embeds.append(embed)
+
+    return embeds
 
 ###############################################################################
 # Paginator
@@ -178,48 +247,6 @@ class MediaAnalyzer(commands.Cog):
         except Exception as e:
             return {"error": f"Failed to analyze image: {e}"}
 
-    def build_embeds_for_section(self, section_name: str, content: str) -> list[discord.Embed]:
-        """
-        Create a list of Embeds for a given section by chunking
-        the text so no single embed goes beyond safe character limits.
-        We aim to prevent any one embed from exceeding 6000 total characters.
-
-        We'll pick ~900-1000 as the chunk size for the actual text, leaving
-        room for triple-backticks, embed title, etc.
-        """
-        content = content.strip()
-        if not content:
-            return []
-
-        # Lower chunk size so we avoid going near Discord's 6000-character limit
-        CHUNK_SIZE = 900  # Adjusted down to give plenty of buffer
-
-        lines = []
-        start_idx = 0
-        while start_idx < len(content):
-            end_idx = min(start_idx + CHUNK_SIZE, len(content))
-            lines.append(content[start_idx:end_idx])
-            start_idx += CHUNK_SIZE
-
-        embeds = []
-        for i, chunk_text in enumerate(lines, start=1):
-            # For the first chunk, embed title = section_name,
-            # otherwise leave it blank.
-            embed_title = section_name if i == 1 else ""
-            embed = discord.Embed(title=embed_title, color=discord.Color.blue())
-
-            # Each embed gets exactly one field containing the chunk,
-            # surrounded by triple backticks to format as code.
-            embed.add_field(
-                name="",
-                value=f"```{chunk_text}```",
-                inline=False
-            )
-
-            embeds.append(embed)
-
-        return embeds
-
     def build_pages(
         self,
         exception_text: str,
@@ -229,31 +256,19 @@ class MediaAnalyzer(commands.Cog):
         """
         Build a list of 'pages.' Each page = up to 10 Embeds.
 
-        1) Build embed-lists for each section (Exception, Enhanced Stacktrace, Modules).
-        2) If an embed-list > 10, chunk it with 'chunk_embeds(...)'.
-        3) Append those sub-lists to the final list of pages.
+        1) Build embed-lists for each section (Exception, Enhanced Stacktrace, Modules)
+           using build_safe_embeds(...).
+        2) Then chunk them into groups of 10 for pagination.
+        3) Return the "pages" - a list of lists of embeds.
         """
-        exc_embeds = self.build_embeds_for_section("Exception", exception_text)
-        stack_embeds = self.build_embeds_for_section("Enhanced Stacktrace", stacktrace_text)
-        mods_embeds = self.build_embeds_for_section("Installed Modules", installed_modules_text)
+        exc_embeds = build_safe_embeds("Exception", exception_text)
+        stack_embeds = build_safe_embeds("Enhanced Stacktrace", stacktrace_text)
+        mods_embeds = build_safe_embeds("Installed Modules", installed_modules_text)
 
-        all_pages = []
-
-        # For each section's embed list, chunk into sets of 10
-        if exc_embeds:
-            for chunked_exc in chunk_embeds(exc_embeds, 10):
-                all_pages.append(chunked_exc)
-
-        if stack_embeds:
-            for chunked_stack in chunk_embeds(stack_embeds, 10):
-                all_pages.append(chunked_stack)
-
-        if mods_embeds:
-            for chunked_mods in chunk_embeds(mods_embeds, 10):
-                all_pages.append(chunked_mods)
+        all_embeds = exc_embeds + stack_embeds + mods_embeds
 
         # If no sections had anything, show a single 'No Data' page
-        if not all_pages:
+        if not all_embeds:
             empty_embed = discord.Embed(
                 title="No Crash Report Data Found",
                 description="Could not find Exception, Enhanced Stacktrace, or Installed Modules.",
@@ -261,7 +276,9 @@ class MediaAnalyzer(commands.Cog):
             )
             return [[empty_embed]]
 
-        return all_pages
+        # Now we chunk the entire list of built embeds in groups of 10
+        pages = chunk_embeds(all_embeds, 10)
+        return pages
 
     @commands.command(name="analyze")
     async def analyze_command(self, ctx, url: str):
