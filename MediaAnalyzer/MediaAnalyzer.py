@@ -5,6 +5,8 @@ import pytesseract
 from bs4 import BeautifulSoup
 from io import BytesIO
 import aiohttp
+import re
+
 
 class MediaAnalyzer(commands.Cog):
     """Analyze images, crash reports, and webpages for AI Assistant functionality."""
@@ -13,11 +15,11 @@ class MediaAnalyzer(commands.Cog):
         self.bot = bot
         self.session = aiohttp.ClientSession()
 
-    async def cog_load(self):
+    async def cog_load(self) -> None:
         """Executed when the cog is loaded."""
         print("MediaAnalyzer cog has been loaded successfully.")
 
-    async def cog_unload(self):
+    async def cog_unload(self) -> None:
         """Executed when the cog is unloaded."""
         if self.session:
             await self.session.close()
@@ -73,7 +75,6 @@ class MediaAnalyzer(commands.Cog):
                 description=f"Crash report content extracted from [the link]({url}):",
                 color=discord.Color.red(),
             )
-            embed.add_field(name="Full Text", value=data["full_text"][:1024], inline=False)
             embed.add_field(
                 name="Exception",
                 value=f"```{data['exception'][:1018]}```" if data["exception"] else "Not Found",
@@ -115,6 +116,84 @@ class MediaAnalyzer(commands.Cog):
                         await ctx.send(embed=embed)
             except Exception as e:
                 await ctx.send(f"Error analyzing the media: {e}")
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        """Handle uploaded images, HTML files, and crash report URLs."""
+        if message.author.bot:
+            return
+
+        urls = [word for word in message.content.split() if word.startswith("http")]
+        for url in urls:
+            if "report.butr.link" in url:
+                # Handle crash report URL
+                data = await self.fetch_webpage(url)
+                if "error" in data:
+                    await message.reply(data["error"])
+                    return
+
+                embed = discord.Embed(
+                    title="Crash Report Analysis",
+                    description=f"Crash report content extracted from [the link]({url}):",
+                    color=discord.Color.red(),
+                )
+                embed.add_field(
+                    name="Exception",
+                    value=f"```{data['exception'][:1018]}```" if data["exception"] else "Not Found",
+                    inline=False,
+                )
+                embed.add_field(
+                    name="Enhanced Stacktrace",
+                    value=f"```{data['enhanced_stacktrace'][:1018]}```" if data["enhanced_stacktrace"] else "Not Found",
+                    inline=False,
+                )
+                await message.reply(embed=embed)
+                return
+
+        # Handle attachments as images or HTML files
+        if message.attachments:
+            for attachment in message.attachments:
+                if attachment.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
+                    try:
+                        image_data = await attachment.read()
+                        analysis = await self.analyze_media(image_data)
+                        if "error" in analysis:
+                            await message.reply(f"Error: {analysis['error']}")
+                        else:
+                            embed = discord.Embed(
+                                title="Media Analysis",
+                                description="Content extracted from the uploaded image.",
+                                color=discord.Color.green(),
+                            )
+                            embed.add_field(
+                                name="Text Content",
+                                value=analysis["text"] or "No text found",
+                                inline=False,
+                            )
+                            embed.add_field(
+                                name="Resolution",
+                                value=f"{analysis['width']}x{analysis['height']}",
+                                inline=False,
+                            )
+                            await message.reply(embed=embed)
+                    except Exception as e:
+                        await message.reply(f"Error analyzing the image: {e}")
+                elif attachment.filename.lower().endswith('.html'):
+                    try:
+                        html_bytes = await attachment.read()
+                        html_content = html_bytes.decode('utf-8')
+                        soup = BeautifulSoup(html_content, 'html.parser')
+                        text = soup.get_text()
+                        embed = discord.Embed(
+                            title="Crash Report Analysis",
+                            description="Extracted text from the uploaded HTML crash report.",
+                            color=discord.Color.blue(),
+                        )
+                        embed.add_field(name="Extracted Content", value=text[:1024], inline=False)
+                        await message.reply(embed=embed)
+                    except Exception as e:
+                        await message.reply(f"Error processing HTML file: {e}")
+
 
 async def setup(bot):
     """Proper async setup for the cog."""
