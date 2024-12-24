@@ -35,14 +35,16 @@ class MediaAnalyzer(commands.Cog):
                 soup = BeautifulSoup(html_content, "html.parser")
                 full_text = soup.get_text()
 
-                # Extract "Exception" and "Enhanced Stacktrace" sections
+                # Extract "Exception," "Enhanced Stacktrace," and "Installed Modules"
                 exception_match = re.search(r"\+ Exception\n(.+?)(?=\n\n|\Z)", full_text, re.DOTALL)
                 enhanced_stacktrace_match = re.search(r"\+ Enhanced Stacktrace\n(.+?)(?=\n\n|\Z)", full_text, re.DOTALL)
+                installed_modules_match = re.search(r"\+ Installed Modules\n(.+?)(?=\n\n|\Z)", full_text, re.DOTALL)
 
                 return {
                     "full_text": full_text.strip(),
                     "exception": exception_match.group(1).strip() if exception_match else "Not Found",
                     "enhanced_stacktrace": enhanced_stacktrace_match.group(1).strip() if enhanced_stacktrace_match else "Not Found",
+                    "installed_modules": installed_modules_match.group(1).strip() if installed_modules_match else "Not Found",
                 }
         except Exception as e:
             return {"error": f"Error fetching webpage: {e}"}
@@ -60,6 +62,33 @@ class MediaAnalyzer(commands.Cog):
         except Exception as e:
             return {"error": f"Failed to analyze image: {e}"}
 
+    async def send_paginated_embeds(self, ctx_or_message, title, description, content):
+        """Send content in paginated embeds if it exceeds the Discord field length limits."""
+        MAX_EMBED_FIELD_LENGTH = 1024
+
+        embeds = []
+        if len(content) > MAX_EMBED_FIELD_LENGTH:
+            chunks = [content[i:i + MAX_EMBED_FIELD_LENGTH] for i in range(0, len(content), MAX_EMBED_FIELD_LENGTH)]
+            for idx, chunk in enumerate(chunks):
+                embed = discord.Embed(
+                    title=f"{title} (Part {idx + 1}/{len(chunks)})",
+                    description=description,
+                    color=discord.Color.red()
+                )
+                embed.add_field(name=title, value=f"```{chunk}```", inline=False)
+                embeds.append(embed)
+        else:
+            embed = discord.Embed(
+                title=title,
+                description=description,
+                color=discord.Color.red(),
+            )
+            embed.add_field(name=title, value=f"```{content}```", inline=False)
+            embeds.append(embed)
+
+        for embed in embeds:
+            await ctx_or_message.send(embed=embed)
+
     @commands.command(name="analyze")
     async def analyze_command(self, ctx, url: str):
         """Command to analyze a media or webpage URL."""
@@ -70,22 +99,13 @@ class MediaAnalyzer(commands.Cog):
                 await ctx.send(data["error"])
                 return
 
-            embed = discord.Embed(
-                title="Crash Report Analysis",
-                description=f"Crash report content extracted from [the link]({url}):",
-                color=discord.Color.red(),
-            )
-            embed.add_field(
-                name="Exception",
-                value=f"```{data['exception'][:1018]}```" if data["exception"] else "Not Found",
-                inline=False,
-            )
-            embed.add_field(
-                name="Enhanced Stacktrace",
-                value=f"```{data['enhanced_stacktrace'][:1018]}```" if data["enhanced_stacktrace"] else "Not Found",
-                inline=False,
-            )
-            await ctx.send(embed=embed)
+            description = f"Crash report content extracted from [the link]({url}):"
+            if data["exception"]:
+                await self.send_paginated_embeds(ctx, "Exception", description, data["exception"])
+            if data["enhanced_stacktrace"]:
+                await self.send_paginated_embeds(ctx, "Enhanced Stacktrace", description, data["enhanced_stacktrace"])
+            if data["installed_modules"]:
+                await self.send_paginated_embeds(ctx, "User's Modlist", description, data["installed_modules"])
         else:
             # Handle image analysis
             try:
@@ -132,22 +152,13 @@ class MediaAnalyzer(commands.Cog):
                     await message.reply(data["error"])
                     return
 
-                embed = discord.Embed(
-                    title="Crash Report Analysis",
-                    description=f"Crash report content extracted from [the link]({url}):",
-                    color=discord.Color.red(),
-                )
-                embed.add_field(
-                    name="Exception",
-                    value=f"```{data['exception'][:1018]}```" if data["exception"] else "Not Found",
-                    inline=False,
-                )
-                embed.add_field(
-                    name="Enhanced Stacktrace",
-                    value=f"```{data['enhanced_stacktrace'][:1018]}```" if data["enhanced_stacktrace"] else "Not Found",
-                    inline=False,
-                )
-                await message.reply(embed=embed)
+                description = f"Crash report content extracted from [the link]({url}):"
+                if data["exception"]:
+                    await self.send_paginated_embeds(message, "Exception", description, data["exception"])
+                if data["enhanced_stacktrace"]:
+                    await self.send_paginated_embeds(message, "Enhanced Stacktrace", description, data["enhanced_stacktrace"])
+                if data["installed_modules"]:
+                    await self.send_paginated_embeds(message, "User's Modlist", description, data["installed_modules"])
                 return
 
         # Handle attachments as images or HTML files
