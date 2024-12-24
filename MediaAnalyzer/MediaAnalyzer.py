@@ -1,11 +1,10 @@
 import discord
-from discord.ext import commands
+from redbot.core import commands
 from PIL import Image
 import pytesseract
 from bs4 import BeautifulSoup
 from io import BytesIO
 import aiohttp
-import re
 
 
 class MediaAnalyzer(commands.Cog):
@@ -16,9 +15,11 @@ class MediaAnalyzer(commands.Cog):
         self.session = aiohttp.ClientSession()
 
     async def cog_load(self) -> None:
+        """Executed when the cog is loaded."""
         print("MediaAnalyzer cog has been loaded successfully.")
 
     async def cog_unload(self) -> None:
+        """Executed when the cog is unloaded."""
         if self.session:
             await self.session.close()
         print("MediaAnalyzer cog has been unloaded and resources cleaned up.")
@@ -80,7 +81,6 @@ class MediaAnalyzer(commands.Cog):
                         html_bytes = await attachment.read()
                         html_content = html_bytes.decode('utf-8')
                         text = self.extract_text_from_html(html_content)
-                        # You can add further processing for crash reports here if needed
                         embed = discord.Embed(
                             title="Crash Report Analysis",
                             description="Extracted text from the uploaded HTML crash report.",
@@ -125,5 +125,11 @@ class MediaAnalyzer(commands.Cog):
 
 
 async def setup(bot):
+    """Proper async setup for the cog."""
     cog = MediaAnalyzer(bot)
-    await bot.add_cog(cog)
+    try:
+        await bot.add_cog(cog)
+    except Exception as e:
+        if cog.session:
+            await cog.session.close()
+        raise e
