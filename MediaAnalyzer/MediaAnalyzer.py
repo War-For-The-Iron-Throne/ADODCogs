@@ -8,14 +8,24 @@ from io import BytesIO
 import aiohttp
 import re
 
+def chunk_embeds(embeds: list[discord.Embed], size=10) -> list[list[discord.Embed]]:
+    """
+    Discord only allows up to 10 embeds in a single message.
+    So if we have more than 10, we split them into multiple 'pages.'
+    """
+    chunks = []
+    for i in range(0, len(embeds), size):
+        chunks.append(embeds[i : i + size])
+    return chunks
+
 class PaginatedEmbeds(View):
     """
-    Single View-based paginator that cycles through pages,
-    where each 'page' can have multiple embeds (sent as 'embeds=[...]').
+    A paginator that cycles through *pages*, where each page is
+    a list of up to 10 discord.Embed objects.
     """
     def __init__(self, pages: list[list[discord.Embed]], invoker_id: int):
         super().__init__(timeout=300)  # 5-minute timeout
-        self.pages = pages  # e.g. [ [embedA, embedB], [embedC], [embedD, embedE], ... ]
+        self.pages = pages  # e.g. [ [embed1, embed2...], [embedX, embedY...] ]
         self.index = 0
         self.invoker_id = invoker_id
 
@@ -24,7 +34,7 @@ class PaginatedEmbeds(View):
         return interaction.user.id == self.invoker_id
 
     async def update_message(self, interaction: discord.Interaction):
-        # Edit the original message to show the new page of embeds.
+        # We must edit the original message with up to 10 embeds:
         await interaction.response.edit_message(
             embeds=self.pages[self.index],
             view=self
@@ -36,8 +46,7 @@ class PaginatedEmbeds(View):
             self.index -= 1
             await self.update_message(interaction)
         else:
-            # If we're already on the first page, we can't "respond" again with interaction.response;
-            # use followup instead.
+            # Already on first page, can't go back further.
             await interaction.followup.send(
                 "You're already on the first page!", ephemeral=True
             )
@@ -51,7 +60,6 @@ class PaginatedEmbeds(View):
             await interaction.followup.send(
                 "You're already on the last page!", ephemeral=True
             )
-
 
 class MediaAnalyzer(commands.Cog):
     """Analyze images, crash reports, and webpages for AI Assistant functionality."""
@@ -74,9 +82,8 @@ class MediaAnalyzer(commands.Cog):
           - Exception
           - Enhanced Stacktrace
           - Installed Modules
-
-        We'll ensure we only capture the lines actually under "Installed Modules"
-        so we don't mix in other headings like "Loaded BLSE Plugins," etc.
+        We'll parse the text, locate these sections, and stop if we see
+        any other known headings (so it doesn't mix them together).
         """
         try:
             async with self.session.get(url) as response:
@@ -84,59 +91,56 @@ class MediaAnalyzer(commands.Cog):
                     return {"error": f"Failed to fetch webpage. HTTP Status: {response.status}"}
 
                 html_content = await response.text()
-                # Use BeautifulSoup to remove any HTML tags, leaving only the text
                 soup = BeautifulSoup(html_content, "html.parser")
                 full_text = soup.get_text()
 
-                # We'll define a pattern of possible section headings we might see,
-                # so we can stop when the next heading appears.
+                # We'll define an 'OR' pattern of headings to stop at:
                 headings_pattern = (
                     r"(?:Exception|Enhanced Stacktrace|Installed Modules|"
-                    r"Involved Modules and Plugins|Loaded BLSE Plugins|Assemblies|"
+                    r"Loaded BLSE Plugins|Involved Modules and Plugins|Assemblies|"
                     r"Native Assemblies|Harmony Patches|Log Files|Mini Dump|Save File|"
                     r"Screenshot|Screenshot Data|Json Model Data)"
                 )
 
-                # Regex for Exception section
+                # Regex for each section:
                 exception_regex = re.compile(
                     rf"[+-]\s*Exception\s+([\s\S]+?)(?=\n[+-]\s*{headings_pattern}|\Z)",
                     re.IGNORECASE
                 )
-
-                # Regex for Enhanced Stacktrace section
                 stacktrace_regex = re.compile(
                     rf"[+-]\s*Enhanced Stacktrace\s+([\s\S]+?)(?=\n[+-]\s*{headings_pattern}|\Z)",
                     re.IGNORECASE
                 )
-
-                # Regex for Installed Modules section
                 modules_regex = re.compile(
                     rf"[+-]\s*Installed Modules\s+([\s\S]+?)(?=\n[+-]\s*{headings_pattern}|\Z)",
                     re.IGNORECASE
                 )
 
+                # 1) Exception:
                 exception_match = exception_regex.search(full_text)
-                stacktrace_match = stacktrace_regex.search(full_text)
-                modules_match = modules_regex.search(full_text)
-
                 exception_text = exception_match.group(1).strip() if exception_match else ""
+
+                # 2) Enhanced Stacktrace:
+                stacktrace_match = stacktrace_regex.search(full_text)
                 stacktrace_text = stacktrace_match.group(1).strip() if stacktrace_match else ""
 
-                # Parse the lines under Installed Modules
+                # 3) Installed Modules:
+                modules_match = modules_regex.search(full_text)
                 installed_modules_text = ""
                 if modules_match:
                     modules_block = modules_match.group(1)
-                    # Capture every line that starts with "+" or "-"
-                    # Example line: "+ Harmony (Bannerlord.Harmony, v2.3.3.207)"
-                    # We don't cut off at the parenthesis so we can capture the entire line if needed:
-                    mod_lines = re.findall(r"^[+\-]\s+(.*)$", modules_block, re.MULTILINE)
 
-                    # Clean them up
-                    mod_lines = [line.strip() for line in mod_lines if line.strip()]
-
-                    # Join them with newline so each mod is on its own line
-                    if mod_lines:
-                        installed_modules_text = "\n".join(mod_lines)
+                    # Grab every line that starts with + or -, ignoring parentheses,
+                    # so we get each mod's display line:
+                    mod_lines = re.findall(
+                        r"^[+-]\s+(.*?)(?:\(|$)",
+                        modules_block,
+                        re.MULTILINE
+                    )
+                    # Clean up the mod lines:
+                    mod_names = [m.strip() for m in mod_lines if m.strip()]
+                    if mod_names:
+                        installed_modules_text = "\n".join(mod_names)
 
                 return {
                     "exception": exception_text,
@@ -162,16 +166,14 @@ class MediaAnalyzer(commands.Cog):
 
     def build_embeds_for_section(self, section_name: str, content: str) -> list[discord.Embed]:
         """
-        Break up a section's content into multiple embeds, if needed.
-        - The first chunk has a title; subsequent chunks do not, to keep it "seamless."
-        - Each chunk is placed in an embed field with code blocks.
-        - Returns a list of embed objects that belong to this section.
+        Break up a section's content into multiple Embeds (1k chunk each),
+        so no single embed field is too large.
         """
         content = content.strip()
         if not content:
             return []
 
-        CHUNK_SIZE = 1024 - 10  # overhead for code block formatting etc.
+        CHUNK_SIZE = 1024 - 10  # overhead for code block formatting
         chunks = []
         start_idx = 0
         while start_idx < len(content):
@@ -200,28 +202,35 @@ class MediaAnalyzer(commands.Cog):
         installed_modules_text: str
     ) -> list[list[discord.Embed]]:
         """
-        Build a list of PAGES, each page is a list of embed objects.
-        We'll do:
-          Page 1 => all 'Exception' embeds
-          Page 2 => all 'Enhanced Stacktrace' embeds
-          Page 3 => all 'Installed Modules' embeds
+        Build a list of 'pages.' Each page is a list of up to 10 Embeds.
 
-        If a section is empty, skip it entirely.
-        If everything is empty, return a single page with "No data" embed.
+        Steps:
+          1) Build embed-lists for each section (Exception, Enhanced Stacktrace, etc.)
+          2) If an embed-list has more than 10, chunk it further.
+          3) Each chunk is a 'page.'
         """
+        # Build each section's embed objects
         exc_embeds = self.build_embeds_for_section("Exception", exception_text)
         stack_embeds = self.build_embeds_for_section("Enhanced Stacktrace", stacktrace_text)
         mods_embeds = self.build_embeds_for_section("Installed Modules", installed_modules_text)
 
-        pages = []
-        if exc_embeds:
-            pages.append(exc_embeds)
-        if stack_embeds:
-            pages.append(stack_embeds)
-        if mods_embeds:
-            pages.append(mods_embeds)
+        # We'll create a final pages list
+        all_pages = []
 
-        if not pages:  # If no data found at all
+        # For each section, chunk its embeds in groups of 10.
+        if exc_embeds:
+            for chunked in chunk_embeds(exc_embeds, 10):
+                all_pages.append(chunked)
+
+        if stack_embeds:
+            for chunked in chunk_embeds(stack_embeds, 10):
+                all_pages.append(chunked)
+
+        if mods_embeds:
+            for chunked in chunk_embeds(mods_embeds, 10):
+                all_pages.append(chunked)
+
+        if not all_pages:
             empty_embed = discord.Embed(
                 title="No Crash Report Data Found",
                 description="Could not find Exception, Enhanced Stacktrace, or Installed Modules.",
@@ -229,15 +238,14 @@ class MediaAnalyzer(commands.Cog):
             )
             return [[empty_embed]]
 
-        return pages
+        return all_pages
 
     @commands.command(name="analyze")
     async def analyze_command(self, ctx, url: str):
         """
         Command to analyze a crash report or an image link.
-        Presents all sections in one message, multiple pages, each page can have multiple embeds.
+        If it's a known crash report link, parse the sections. Otherwise, try to OCR an image.
         """
-        # Build the pages first, so the user can flip through them without re-fetching.
         if "report.butr.link" in url.lower():
             data = await self.fetch_webpage(url)
             if "error" in data:
@@ -248,15 +256,16 @@ class MediaAnalyzer(commands.Cog):
             mods_text = data.get("installed_modules", "")
 
             pages = self.build_pages(exception_text, stacktrace_text, mods_text)
+            # If there's only one page, no next/prev needed
             if len(pages) == 1:
-                # Single page => possibly multiple embeds
                 return await ctx.send(embeds=pages[0])
 
+            # Use paginator
             view = PaginatedEmbeds(pages, ctx.author.id)
-            # Send the first page with the paginator
             await ctx.send(embeds=pages[0], view=view)
+
         else:
-            # Otherwise, treat the URL as an image to be analyzed by pytesseract
+            # Attempt to OCR an image
             try:
                 async with self.session.get(url) as response:
                     if response.status != 200:
@@ -287,7 +296,10 @@ class MediaAnalyzer(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        """Auto-detect crash report links in messages and process them similarly."""
+        """
+        Auto-detect crash report links in messages.
+        Build all pages and send them if found.
+        """
         if message.author.bot:
             return
 
@@ -311,8 +323,7 @@ class MediaAnalyzer(commands.Cog):
                     await message.reply(embeds=pages[0], view=view)
 
                 return
-
-        # If no recognized crash-report link, do nothing special here.
+        # Otherwise do nothing if no crash links.
 
 async def setup(bot):
     cog = MediaAnalyzer(bot)
