@@ -35,16 +35,46 @@ class MediaAnalyzer(commands.Cog):
                 soup = BeautifulSoup(html_content, "html.parser")
                 full_text = soup.get_text()
 
-                # Extract specific sections
+                # Extract specific sections via regex
                 exception_match = re.search(r"\+ Exception\n(.+?)(?=\n\n|\Z)", full_text, re.DOTALL)
                 enhanced_stacktrace_match = re.search(r"\+ Enhanced Stacktrace\n(.+?)(?=\n\n|\Z)", full_text, re.DOTALL)
                 installed_modules_match = re.search(r"\+ Installed Modules\n(.+?)(?=\n\n|\Z)", full_text, re.DOTALL)
+
+                # If installed modules are found, parse out only the 'names'
+                if installed_modules_match:
+                    installed_modules_raw = installed_modules_match.group(1).strip()
+
+                    # Parse out the simple mod names (anything after "+ " and before the first "(").
+                    # Each line typically looks like: "+ Harmony (Bannerlord.Harmony, v2.3.3.207)"
+                    # We only want "Harmony"
+                    mod_lines = installed_modules_raw.splitlines()
+                    just_names = []
+                    for line in mod_lines:
+                        # Skip blank lines
+                        line = line.strip()
+                        if not line:
+                            continue
+
+                        match = re.match(r"\+ (.*?) \(", line)
+                        if match:
+                            just_names.append(match.group(1))
+                        else:
+                            # If the line doesn't follow the exact pattern, you could add fallback logic or skip
+                            # For example, some lines might be just: + Something
+                            # We'll do a simpler fallback to everything after +
+                            fallback_match = re.match(r"\+ (.*)", line)
+                            if fallback_match:
+                                just_names.append(fallback_match.group(1))
+
+                    installed_modules_clean = "\n".join(just_names)
+                else:
+                    installed_modules_clean = "Not Found"
 
                 return {
                     "full_text": full_text.strip(),
                     "exception": exception_match.group(1).strip() if exception_match else "Not Found",
                     "enhanced_stacktrace": enhanced_stacktrace_match.group(1).strip() if enhanced_stacktrace_match else "Not Found",
-                    "installed_modules": installed_modules_match.group(1).strip() if installed_modules_match else "Not Found",
+                    "installed_modules": installed_modules_clean,
                 }
         except Exception as e:
             return {"error": f"Error fetching webpage: {e}"}
@@ -70,8 +100,6 @@ class MediaAnalyzer(commands.Cog):
         MAX_EMBED_FIELD_LENGTH = 1024
         # Reserve space for the ``` (6 characters) plus a little buffer for newlines.
         CHARS_FOR_CODEBLOCK = 6
-        # So the max chunk length is 1024 - 6 = 1018.
-        # If you want additional safety for newlines, you could lower this further (e.g., 1015).
         MAX_CONTENT_LENGTH = MAX_EMBED_FIELD_LENGTH - CHARS_FOR_CODEBLOCK
 
         embeds = []
@@ -106,11 +134,11 @@ class MediaAnalyzer(commands.Cog):
                 return
 
             description = f"Crash report content extracted from [the link]({url}):"
-            if data["exception"]:
+            if data["exception"] != "Not Found":
                 await self.send_paginated_embeds(ctx, "Exception", description, data["exception"])
-            if data["enhanced_stacktrace"]:
+            if data["enhanced_stacktrace"] != "Not Found":
                 await self.send_paginated_embeds(ctx, "Enhanced Stacktrace", description, data["enhanced_stacktrace"])
-            if data["installed_modules"]:
+            if data["installed_modules"] != "Not Found":
                 await self.send_paginated_embeds(ctx, "User's Modlist", description, data["installed_modules"])
         else:
             # Handle image analysis
@@ -160,11 +188,11 @@ class MediaAnalyzer(commands.Cog):
                     return
 
                 description = f"Crash report content extracted from [the link]({url}):"
-                if data["exception"]:
+                if data["exception"] != "Not Found":
                     await self.send_paginated_embeds(message, "Exception", description, data["exception"])
-                if data["enhanced_stacktrace"]:
+                if data["enhanced_stacktrace"] != "Not Found":
                     await self.send_paginated_embeds(message, "Enhanced Stacktrace", description, data["enhanced_stacktrace"])
-                if data["installed_modules"]:
+                if data["installed_modules"] != "Not Found":
                     await self.send_paginated_embeds(message, "User's Modlist", description, data["installed_modules"])
                 return
 
