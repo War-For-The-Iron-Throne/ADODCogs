@@ -1,4 +1,5 @@
 import discord
+from discord.ui import View, Button
 from redbot.core import commands
 from PIL import Image
 import pytesseract
@@ -6,6 +7,48 @@ from bs4 import BeautifulSoup
 from io import BytesIO
 import aiohttp
 import re
+
+
+class PaginatedEmbeds(View):
+    """
+    A simple View that handles 'Previous' and 'Next' button presses to flip through a list of embeds.
+    """
+    def __init__(self, embeds, user_id: int):
+        super().__init__(timeout=180)  # 3-minute timeout, for example
+        self.embeds = embeds
+        self.index = 0
+        self.user_id = user_id  # So only the command invoker can flip pages
+
+    async def update_message(self, interaction: discord.Interaction):
+        # Update the embed in-place
+        await interaction.response.edit_message(embed=self.embeds[self.index], view=self)
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.blurple)
+    async def previous_button(self, interaction: discord.Interaction, button: Button):
+        # Ensure only the original user can flip pages
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message(
+                "You can't control this paginator.", ephemeral=True
+            )
+
+        if self.index > 0:
+            self.index -= 1
+            await self.update_message(interaction)
+        else:
+            await interaction.response.send_message("You're already on the first page!", ephemeral=True)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.blurple)
+    async def next_button(self, interaction: discord.Interaction, button: Button):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message(
+                "You can't control this paginator.", ephemeral=True
+            )
+
+        if self.index < len(self.embeds) - 1:
+            self.index += 1
+            await self.update_message(interaction)
+        else:
+            await interaction.response.send_message("You're already on the last page!", ephemeral=True)
 
 
 class MediaAnalyzer(commands.Cog):
@@ -44,29 +87,22 @@ class MediaAnalyzer(commands.Cog):
                 if installed_modules_match:
                     installed_modules_raw = installed_modules_match.group(1).strip()
 
-                    # Parse out the simple mod names (anything after "+ " and before the first "(").
-                    # Each line typically looks like: "+ Harmony (Bannerlord.Harmony, v2.3.3.207)"
-                    # We only want "Harmony"
+                    # Example lines:
+                    #   + Harmony (Bannerlord.Harmony, v2.3.3.207)
+                    #   + A Dance of Dragons - Code (ADODCODE, v1.2.11.0)
+                    # We'll grab everything between '+ ' and '(' or the end of line
                     mod_lines = installed_modules_raw.splitlines()
                     just_names = []
                     for line in mod_lines:
-                        # Skip blank lines
                         line = line.strip()
-                        if not line:
+                        if not line.startswith("+ "):
                             continue
-
-                        match = re.match(r"\+ (.*?) \(", line)
+                        # This pattern picks up everything after '+ ' up until '(' or end of string
+                        match = re.match(r"\+\s+(.+?)(?:\(|$)", line)
                         if match:
-                            just_names.append(match.group(1))
-                        else:
-                            # If the line doesn't follow the exact pattern, you could add fallback logic or skip
-                            # For example, some lines might be just: + Something
-                            # We'll do a simpler fallback to everything after +
-                            fallback_match = re.match(r"\+ (.*)", line)
-                            if fallback_match:
-                                just_names.append(fallback_match.group(1))
+                            just_names.append(match.group(1).strip())
 
-                    installed_modules_clean = "\n".join(just_names)
+                    installed_modules_clean = "\n".join(just_names) if just_names else "Not Found"
                 else:
                     installed_modules_clean = "Not Found"
 
@@ -92,36 +128,49 @@ class MediaAnalyzer(commands.Cog):
         except Exception as e:
             return {"error": f"Failed to analyze image: {e}"}
 
-    async def send_paginated_embeds(self, ctx_or_message, title, description, content):
+    def build_embeds_with_buttons(
+        self, title: str, description: str, content: str
+    ) -> list[discord.Embed]:
         """
-        Send content in paginated embeds, ensuring each field is within Discord's 1024-char limit.
-        We account for code-block formatting to avoid surpassing 1024 characters.
+        Build a list of Embeds, each containing a chunk of content, which can be
+        paginated with Next/Prev buttons. We aim to include as much as possible
+        in each embed while respecting the 1024-char limit in a single field.
         """
         MAX_EMBED_FIELD_LENGTH = 1024
-        # Reserve space for the ``` (6 characters) plus a little buffer for newlines.
+        # Reserve space for code block formatting (6 chars: ```\n and \n```)
+        # plus a little buffer for newlines, etc.
         CHARS_FOR_CODEBLOCK = 6
         MAX_CONTENT_LENGTH = MAX_EMBED_FIELD_LENGTH - CHARS_FOR_CODEBLOCK
 
-        embeds = []
-        chunks = [content[i : i + MAX_CONTENT_LENGTH] for i in range(0, len(content), MAX_CONTENT_LENGTH)]
-        for idx, chunk in enumerate(chunks):
-            # Truncate chunk if it somehow exceeds the allowed length with formatting
-            if len(chunk) > MAX_CONTENT_LENGTH:
-                chunk = chunk[:MAX_CONTENT_LENGTH]
+        lines = content.split("\n")
 
+        # We'll build one or more fields. We combine lines until we exceed the chunk limit.
+        pages = []
+        current_chunk = ""
+        for line in lines:
+            # +1 for the newline we might add
+            if len(current_chunk) + len(line) + 1 <= MAX_CONTENT_LENGTH:
+                current_chunk += line + "\n"
+            else:
+                pages.append(current_chunk.rstrip("\n"))
+                current_chunk = line + "\n"
+
+        # Append the last chunk if it exists
+        if current_chunk.strip():
+            pages.append(current_chunk.rstrip("\n"))
+
+        # Now build each embed
+        embeds = []
+        for idx, chunk in enumerate(pages):
             embed = discord.Embed(
-                title=f"{title} (Part {idx + 1}/{len(chunks)})",
+                title=f"{title} (Page {idx + 1}/{len(pages)})",
                 description=description if idx == 0 else None,
                 color=discord.Color.red(),
             )
             embed.add_field(name="Details", value=f"```{chunk}```", inline=False)
             embeds.append(embed)
 
-        for embed in embeds:
-            if isinstance(ctx_or_message, discord.Message):
-                await ctx_or_message.reply(embed=embed)
-            else:
-                await ctx_or_message.send(embed=embed)
+        return embeds
 
     @commands.command(name="analyze")
     async def analyze_command(self, ctx, url: str):
@@ -134,12 +183,41 @@ class MediaAnalyzer(commands.Cog):
                 return
 
             description = f"Crash report content extracted from [the link]({url}):"
+
+            # Build up to three different sets of pages:
+            #   1) Exception
+            #   2) Enhanced Stacktrace
+            #   3) Installed Modules
+            # We'll unify them if you prefer, but let's do them individually for clarity
+            # and send them with button-based pagination for each section.
+
+            # 1) Exception
             if data["exception"] != "Not Found":
-                await self.send_paginated_embeds(ctx, "Exception", description, data["exception"])
+                exc_embeds = self.build_embeds_with_buttons(
+                    "Exception", description, data["exception"]
+                )
+                if exc_embeds:
+                    view = PaginatedEmbeds(exc_embeds, user_id=ctx.author.id)
+                    await ctx.send(embed=exc_embeds[0], view=view)
+
+            # 2) Enhanced Stacktrace
             if data["enhanced_stacktrace"] != "Not Found":
-                await self.send_paginated_embeds(ctx, "Enhanced Stacktrace", description, data["enhanced_stacktrace"])
+                stack_embeds = self.build_embeds_with_buttons(
+                    "Enhanced Stacktrace", description, data["enhanced_stacktrace"]
+                )
+                if stack_embeds:
+                    view = PaginatedEmbeds(stack_embeds, user_id=ctx.author.id)
+                    await ctx.send(embed=stack_embeds[0], view=view)
+
+            # 3) Installed Modules
             if data["installed_modules"] != "Not Found":
-                await self.send_paginated_embeds(ctx, "User's Modlist", description, data["installed_modules"])
+                modlist_embeds = self.build_embeds_with_buttons(
+                    "User's Modlist", description, data["installed_modules"]
+                )
+                if modlist_embeds:
+                    view = PaginatedEmbeds(modlist_embeds, user_id=ctx.author.id)
+                    await ctx.send(embed=modlist_embeds[0], view=view)
+
         else:
             # Handle image analysis
             try:
@@ -188,12 +266,34 @@ class MediaAnalyzer(commands.Cog):
                     return
 
                 description = f"Crash report content extracted from [the link]({url}):"
+
+                # 1) Exception
                 if data["exception"] != "Not Found":
-                    await self.send_paginated_embeds(message, "Exception", description, data["exception"])
+                    exc_embeds = self.build_embeds_with_buttons(
+                        "Exception", description, data["exception"]
+                    )
+                    if exc_embeds:
+                        view = PaginatedEmbeds(exc_embeds, user_id=message.author.id)
+                        await message.reply(embed=exc_embeds[0], view=view)
+
+                # 2) Enhanced Stacktrace
                 if data["enhanced_stacktrace"] != "Not Found":
-                    await self.send_paginated_embeds(message, "Enhanced Stacktrace", description, data["enhanced_stacktrace"])
+                    stack_embeds = self.build_embeds_with_buttons(
+                        "Enhanced Stacktrace", description, data["enhanced_stacktrace"]
+                    )
+                    if stack_embeds:
+                        view = PaginatedEmbeds(stack_embeds, user_id=message.author.id)
+                        await message.reply(embed=stack_embeds[0], view=view)
+
+                # 3) Installed Modules
                 if data["installed_modules"] != "Not Found":
-                    await self.send_paginated_embeds(message, "User's Modlist", description, data["installed_modules"])
+                    modlist_embeds = self.build_embeds_with_buttons(
+                        "User's Modlist", description, data["installed_modules"]
+                    )
+                    if modlist_embeds:
+                        view = PaginatedEmbeds(modlist_embeds, user_id=message.author.id)
+                        await message.reply(embed=modlist_embeds[0], view=view)
+
                 return
 
         # Look for attachments in the message
