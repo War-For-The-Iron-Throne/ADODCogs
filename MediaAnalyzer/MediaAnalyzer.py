@@ -3,6 +3,7 @@ from PIL import Image
 import pytesseract
 from io import BytesIO
 import aiohttp
+import discord
 
 
 class MediaAnalyzer(commands.Cog):  # Ensure it inherits from commands.Cog
