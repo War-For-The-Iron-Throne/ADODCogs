@@ -62,26 +62,28 @@ class MediaAnalyzer(commands.Cog):
         except Exception as e:
             return {"error": f"Failed to analyze image: {e}"}
 
-    async def send_paginated_embeds(self, ctx_or_message, title, description, content):
-        """Send content in paginated embeds if it exceeds the Discord field length limits."""
-        MAX_EMBED_FIELD_LENGTH = 1024
+async def send_paginated_embeds(self, ctx_or_message, title, description, content):
+    """Send content in paginated embeds if it exceeds the Discord field length limits."""
+    MAX_EMBED_FIELD_LENGTH = 1024
+    MAX_CONTENT_LENGTH = MAX_EMBED_FIELD_LENGTH - 6  # Account for the added ``` markdown
 
-        chunks = [content[i:i + MAX_EMBED_FIELD_LENGTH] for i in range(0, len(content), MAX_EMBED_FIELD_LENGTH)]
-        embeds = []
-        for idx, chunk in enumerate(chunks):
-            embed = discord.Embed(
-                title=f"{title} (Part {idx + 1}/{len(chunks)})",
-                description=description if idx == 0 else None,
-                color=discord.Color.red(),
-            )
-            embed.add_field(name="Details", value=f"```{chunk}```", inline=False)
-            embeds.append(embed)
+    embeds = []
+    chunks = [content[i:i + MAX_CONTENT_LENGTH] for i in range(0, len(content), MAX_CONTENT_LENGTH)]
+    for idx, chunk in enumerate(chunks):
+        embed = discord.Embed(
+            title=f"{title} (Part {idx + 1}/{len(chunks)})",
+            description=description if idx == 0 else None,
+            color=discord.Color.red()
+        )
+        embed.add_field(name="Details", value=f"```{chunk}```", inline=False)
+        embeds.append(embed)
 
-        for embed in embeds:
-            if isinstance(ctx_or_message, discord.Message):
-                await ctx_or_message.reply(embed=embed)
-            else:
-                await ctx_or_message.send(embed=embed)
+    for embed in embeds:
+        if isinstance(ctx_or_message, discord.Message):
+            await ctx_or_message.reply(embed=embed)
+        else:
+            await ctx_or_message.send(embed=embed)
+
 
     @commands.command(name="analyze")
     async def analyze_command(self, ctx, url: str):
