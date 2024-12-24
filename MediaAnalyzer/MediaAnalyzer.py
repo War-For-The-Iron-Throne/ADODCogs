@@ -24,6 +24,8 @@ class PaginatedEmbeds(View):
         return interaction.user.id == self.invoker_id
 
     async def update_message(self, interaction: discord.Interaction):
+        # Because we've already sent a response in the command,
+        # we should edit the message or use followup here
         await interaction.response.edit_message(
             embeds=self.pages[self.index],
             view=self
@@ -35,7 +37,9 @@ class PaginatedEmbeds(View):
             self.index -= 1
             await self.update_message(interaction)
         else:
-            await interaction.response.send_message(
+            # If we're already on the first page, we can't do a new "interaction.response.send_message"
+            # because we've already responded. We can do:
+            await interaction.followup.send(
                 "You're already on the first page!", ephemeral=True
             )
 
@@ -45,7 +49,7 @@ class PaginatedEmbeds(View):
             self.index += 1
             await self.update_message(interaction)
         else:
-            await interaction.response.send_message(
+            await interaction.followup.send(
                 "You're already on the last page!", ephemeral=True
             )
 
@@ -72,10 +76,9 @@ class MediaAnalyzer(commands.Cog):
           - Enhanced Stacktrace
           - Installed Modules
 
-        We'll use more specific regex lookaheads so we don't stop capturing
-        just because we see '+ IL:' or '+ C#:'. Instead, we only stop when
-        we see the next recognized section (Exception, Enhanced Stacktrace,
-        Installed Modules, etc.) or the end of the file.
+        In some crash reports, there are many sections (Involved Modules, BLSE Plugins, etc.).
+        We'll stop capturing the Installed Modules section whenever we see the next known
+        heading so it doesn't mix in all those other categories.
         """
         try:
             async with self.session.get(url) as response:
@@ -83,36 +86,38 @@ class MediaAnalyzer(commands.Cog):
                     return {"error": f"Failed to fetch webpage. HTTP Status: {response.status}"}
 
                 html_content = await response.text()
-                full_text = BeautifulSoup(html_content, "html.parser").get_text()
+                soup = BeautifulSoup(html_content, "html.parser")
+                # Just get the text for regex-based extraction
+                full_text = soup.get_text()
 
-                # We'll define regex patterns that specifically stop at the
-                # next recognized heading or the end of file:
-                # (Exception / Enhanced Stacktrace / Installed Modules)
-                # You can expand these if the site has more sections you want to parse.
+                # We'll define big "OR" patterns for what headings to stop at.
+                # That way, "Installed Modules" won't keep grabbing "Loaded BLSE Plugins" etc.
+                headings_pattern = (
+                    r"(?:Exception|Enhanced Stacktrace|Installed Modules|"
+                    r"Involved Modules and Plugins|Loaded BLSE Plugins|Assemblies|"
+                    r"Native Assemblies|Harmony Patches|Log Files|Mini Dump|Save File|"
+                    r"Screenshot|Screenshot Data|Json Model Data)"
+                )
 
-                # Exception:
+                # 1) Exception
+                # Stop at the next recognized heading or end-of-file:
                 exception_regex = re.compile(
-                    r"[+-]\s*Exception\s+([\s\S]+?)(?="
-                    r"\n[+-]\s*(?:Enhanced Stacktrace|Installed Modules|Exception)"
-                    r"|\Z)",
-                    re.IGNORECASE
-                )
-                # Enhanced Stacktrace:
-                stacktrace_regex = re.compile(
-                    r"[+-]\s*Enhanced Stacktrace\s+([\s\S]+?)(?="
-                    r"\n[+-]\s*(?:Exception|Installed Modules|Enhanced Stacktrace)"
-                    r"|\Z)",
-                    re.IGNORECASE
-                )
-                # Installed Modules:
-                modules_regex = re.compile(
-                    r"[+-]\s*Installed Modules\s+([\s\S]+?)(?="
-                    r"\n[+-]\s*(?:Exception|Enhanced Stacktrace|Installed Modules)"
-                    r"|\Z)",
+                    rf"[+-]\s*Exception\s+([\s\S]+?)(?=\n[+-]\s*{headings_pattern}|\Z)",
                     re.IGNORECASE
                 )
 
-                # Now extract text via these patterns
+                # 2) Enhanced Stacktrace
+                stacktrace_regex = re.compile(
+                    rf"[+-]\s*Enhanced Stacktrace\s+([\s\S]+?)(?=\n[+-]\s*{headings_pattern}|\Z)",
+                    re.IGNORECASE
+                )
+
+                # 3) Installed Modules
+                modules_regex = re.compile(
+                    rf"[+-]\s*Installed Modules\s+([\s\S]+?)(?=\n[+-]\s*{headings_pattern}|\Z)",
+                    re.IGNORECASE
+                )
+
                 exception_match = exception_regex.search(full_text)
                 exception_text = exception_match.group(1).strip() if exception_match else ""
 
@@ -123,15 +128,12 @@ class MediaAnalyzer(commands.Cog):
                 installed_modules_text = ""
                 if modules_match:
                     modules_block = modules_match.group(1)
-                    # We'll capture lines beginning with '+ ' or '- ', ignoring parentheses
-                    # so we just get the mod name or mod name + version:
-                    mods = re.findall(
-                        r"^[+-]\s+(.*?)(?:\(|$)",
-                        modules_block,
-                        re.MULTILINE
-                    )
+                    # We only want lines that look like "+ Something (Ident, version)" or "- Something..."
+                    # So let's grab lines that begin with + or -, then the mod name, ignoring parentheses
+                    # up until we hit them or the line's end:
+                    mod_lines = re.findall(r"^[+-]\s+(.*?)(?:\(|$)", modules_block, re.MULTILINE)
                     # Clean them up
-                    mod_names = [m.strip() for m in mods if m.strip()]
+                    mod_names = [m.strip() for m in mod_lines if m.strip()]
                     if mod_names:
                         installed_modules_text = "\n".join(mod_names)
 
@@ -202,6 +204,7 @@ class MediaAnalyzer(commands.Cog):
           Page 1 => all 'Exception' embeds
           Page 2 => all 'Enhanced Stacktrace' embeds
           Page 3 => all 'Installed Modules' embeds
+
         If a section is empty, skip it entirely.
         If everything is empty, return a single page with "No data" embed.
         """
@@ -233,9 +236,13 @@ class MediaAnalyzer(commands.Cog):
         """
         Command to analyze a crash report or an image link.
         Presents all sections in one message, multiple pages, each page can have multiple embeds.
+
+        - If it's a crash report from 'report.butr.link', parse the text for
+          Exception / Enhanced Stacktrace / Installed Modules, then display them in a paginator.
+        - Otherwise, treat the URL as an image link to analyze with pytesseract.
         """
-        # If it's a known crash report link
-        if "report.butr.link" in url:
+        # Build all pages *first*, then send the first embed with the paginator.
+        if "report.butr.link" in url.lower():
             data = await self.fetch_webpage(url)
             if "error" in data:
                 return await ctx.send(data["error"])
@@ -245,16 +252,17 @@ class MediaAnalyzer(commands.Cog):
             mods_text = data.get("installed_modules", "")
 
             pages = self.build_pages(exception_text, stacktrace_text, mods_text)
+            # If there's only one page, no next/prev
             if len(pages) == 1:
-                # Single "page" (though possibly multiple embeds in that list)
                 return await ctx.send(embeds=pages[0])
 
-            # Otherwise, use the paginator
+            # Otherwise, use our paginator
             view = PaginatedEmbeds(pages, ctx.author.id)
+            # Because the pages are already built, pressing Next won't cause a re-fetch or anything.
             await ctx.send(embeds=pages[0], view=view)
 
         else:
-            # Otherwise, assume it's an image link to analyze with pytesseract
+            # Otherwise, assume it's an image to analyze (OCR)
             try:
                 async with self.session.get(url) as response:
                     if response.status != 200:
@@ -285,13 +293,16 @@ class MediaAnalyzer(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        """Auto-detect crash report links in messages."""
+        """
+        Auto-detect crash report links in messages, build all pages,
+        and display them if a recognized link is found.
+        """
         if message.author.bot:
             return
 
         urls = [word for word in message.content.split() if word.startswith("http")]
         for url in urls:
-            if "report.butr.link" in url:
+            if "report.butr.link" in url.lower():
                 data = await self.fetch_webpage(url)
                 if "error" in data:
                     await message.reply(data["error"])
@@ -311,7 +322,7 @@ class MediaAnalyzer(commands.Cog):
 
                 return
 
-        # If no crash-report link is found, you could handle other logic/attachments here
+        # If no crash-report link found, do nothing special here (optional).
 
 async def setup(bot):
     cog = MediaAnalyzer(bot)
