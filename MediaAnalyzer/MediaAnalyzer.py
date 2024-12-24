@@ -19,7 +19,8 @@ class MediaAnalyzer(commands.Cog):
 
     async def cog_unload(self) -> None:
         """Executed when the cog is unloaded."""
-        await self.session.close()
+        if self.session is not None:
+            await self.session.close()
         print("MediaAnalyzer cog has been unloaded and resources cleaned up.")
 
     async def analyze_media(self, url: str, *args, **kwargs) -> dict:
@@ -85,5 +86,11 @@ class MediaAnalyzer(commands.Cog):
         await cog.register_function(cog_name="MediaAnalyzer", schema=schema)
 
 
-async def setup(bot: commands.Bot):
-    await bot.add_cog(MediaAnalyzer(bot))
+async def setup(bot):
+    cog = MediaAnalyzer(bot)
+    try:
+        await bot.add_cog(cog)
+    except Exception as e:
+        if cog.session:
+            await cog.session.close()
+        raise e
