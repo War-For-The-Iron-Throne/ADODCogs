@@ -8,23 +8,26 @@ from io import BytesIO
 import aiohttp
 import re
 
+
 class PaginatedEmbeds(View):
-    """
-    A View that handles 'Previous' and 'Next' button presses to flip through a unified list of pages.
-    """
-    def __init__(self, embeds, invoker_id: int):
+    """A single View-based paginator that cycles through one continuous list of pages (embeds)."""
+
+    def __init__(self, pages: list[discord.Embed], invoker_id: int):
         super().__init__(timeout=300)  # 5-minute timeout
-        self.embeds = embeds
+        self.pages = pages
         self.index = 0
-        self.invoker_id = invoker_id  # So only the command/message author can flip pages
+        self.invoker_id = invoker_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        # Only allow the original user to interact with the buttons
+        """
+        Only allow the original user to interact with pagination,
+        so random people can’t hijack it.
+        """
         return interaction.user.id == self.invoker_id
 
     async def update_message(self, interaction: discord.Interaction):
-        """Edit the original message to show the new page."""
-        await interaction.response.edit_message(embed=self.embeds[self.index], view=self)
+        """Edits the existing message to show the new page."""
+        await interaction.response.edit_message(embed=self.pages[self.index], view=self)
 
     @discord.ui.button(label="Previous", style=discord.ButtonStyle.blurple)
     async def previous_button(self, interaction: discord.Interaction, button: Button):
@@ -38,13 +41,14 @@ class PaginatedEmbeds(View):
 
     @discord.ui.button(label="Next", style=discord.ButtonStyle.blurple)
     async def next_button(self, interaction: discord.Interaction, button: Button):
-        if self.index < len(self.embeds) - 1:
+        if self.index < len(self.pages) - 1:
             self.index += 1
             await self.update_message(interaction)
         else:
             await interaction.response.send_message(
                 "You're already on the last page!", ephemeral=True
             )
+
 
 class MediaAnalyzer(commands.Cog):
     """Analyze images, crash reports, and webpages for AI Assistant functionality."""
@@ -63,7 +67,7 @@ class MediaAnalyzer(commands.Cog):
 
     async def fetch_webpage(self, url: str) -> dict:
         """
-        Fetch the content of a crash-report webpage and unify:
+        Fetch the content of a crash-report webpage and extract:
           - Exception
           - Enhanced Stacktrace
           - Installed Modules (just mod names)
@@ -76,121 +80,187 @@ class MediaAnalyzer(commands.Cog):
                 soup = BeautifulSoup(html_content, "html.parser")
                 full_text = soup.get_text()
 
-                # Extract sections via regex
-                exception_match = re.search(r"\+ Exception\n(.+?)(?=\n\n|\Z)", full_text, re.DOTALL)
-                enhanced_stacktrace_match = re.search(r"\+ Enhanced Stacktrace\n(.+?)(?=\n\n|\Z)", full_text, re.DOTALL)
-                installed_modules_match = re.search(r"\+ Installed Modules\n(.+?)(?=\n\n|\Z)", full_text, re.DOTALL)
+                # Regex matches
+                exception_match = re.search(
+                    r"\+ Exception\s+(.+?)(?=\n\n|\Z)",
+                    full_text,
+                    re.DOTALL
+                )
+                stacktrace_match = re.search(
+                    r"\+ Enhanced Stacktrace\s+(.+?)(?=\n\n|\Z)",
+                    full_text,
+                    re.DOTALL
+                )
+                modules_match = re.search(
+                    r"\+ Installed Modules\s+(.+?)(?=\n\n|\Z)",
+                    full_text,
+                    re.DOTALL
+                )
 
-                exception_text = exception_match.group(1).strip() if exception_match else None
-                stacktrace_text = enhanced_stacktrace_match.group(1).strip() if enhanced_stacktrace_match else None
+                # Prepare each data piece (None if not found)
+                exception_text = (
+                    exception_match.group(1).strip() if exception_match else None
+                )
+                stacktrace_text = (
+                    stacktrace_match.group(1).strip() if stacktrace_match else None
+                )
 
-                # Capture installed modules, just the mod names
-                mod_names = []
-                if installed_modules_match:
-                    installed_modules_raw = installed_modules_match.group(1).strip()
-                    for line in installed_modules_raw.splitlines():
+                # Installed modules: parse lines, extracting only mod name
+                installed_modules_text = None
+                if modules_match:
+                    mod_raw = modules_match.group(1).strip()
+                    mod_names = []
+                    for line in mod_raw.splitlines():
                         line = line.strip()
                         if not line.startswith("+ "):
                             continue
-                        # Capture everything after '+ ' until '(' or end of line
+                        # capture text after '+ ' up to '(' or EOL
                         m = re.match(r"\+\s+(.+?)(?:\(|$)", line)
                         if m:
                             mod_names.append(m.group(1).strip())
-                # Convert the mod names list to a single string, or None if none found
-                installed_modules_text = "\n".join(mod_names) if mod_names else None
+
+                    if mod_names:
+                        installed_modules_text = "\n".join(mod_names)
 
                 return {
-                    "full_text": full_text.strip(),  # Entire text if needed
                     "exception": exception_text,
                     "enhanced_stacktrace": stacktrace_text,
-                    "installed_modules": installed_modules_text
+                    "installed_modules": installed_modules_text,
                 }
+
         except Exception as e:
             return {"error": f"Error fetching webpage: {e}"}
 
-    def build_unified_pages(self, data: dict, link: str) -> list[discord.Embed]:
+    async def analyze_media(self, image_data: bytes) -> dict:
+        """Analyzes media data for text and content."""
+        try:
+            image = Image.open(BytesIO(image_data))
+            text = pytesseract.image_to_string(image)
+            return {
+                "text": text.strip(),
+                "width": image.width,
+                "height": image.height,
+            }
+        except Exception as e:
+            return {"error": f"Failed to analyze image: {e}"}
+
+    def build_section_pages(self, section_name: str, content: str) -> list[discord.Embed]:
         """
-        Combine Exception, Enhanced Stacktrace, and Installed Modules into one big string,
-        then chunk it across multiple embed pages with code block formatting.
+        Given a single section (e.g., 'Exception') and its content,
+        chunk it into multiple pages if necessary, returning a list of embeds.
+        Each embed has a single field named "Details".
         """
-        # Build a single text block with all relevant sections in order
-        sections = []
-        sections.append(f"Crash report content extracted from the link: {link}\n")
+        # If there's no content, return an empty list
+        if not content.strip():
+            return []
 
-        if data.get("exception"):
-            sections.append("## Exception\n" + data["exception"])
-
-        if data.get("enhanced_stacktrace"):
-            sections.append("## Enhanced Stacktrace\n" + data["enhanced_stacktrace"])
-
-        if data.get("installed_modules"):
-            sections.append("## User's Modlist\n" + data["installed_modules"])
-
-        # If absolutely nothing found, fallback
-        if len(sections) == 1 and sections[0].startswith("Crash report content extracted"):
-            sections.append("Nothing found. Possibly invalid or missing data.")
-
-        unified_text = "\n\n".join(sections).strip()
-        if not unified_text:
-            unified_text = "No data to display."
-
-        # Now we chunk this text into multiple pages
+        # We'll chunk the content based on the max field limit
         MAX_EMBED_FIELD_LENGTH = 1024
-        # We'll reserve ~6-10 chars for code-block formatting & newlines, let's do 10
-        # to be safe for line breaks
-        CODEBLOCK_OVERHEAD = 10
-        chunk_size = MAX_EMBED_FIELD_LENGTH - CODEBLOCK_OVERHEAD
+        # Subtract ~10 characters for code blocks/newlines, etc.
+        chunk_size = MAX_EMBED_FIELD_LENGTH - 10
 
-        pages = []
+        # Split into pages
+        chunks = []
         start_idx = 0
-        while start_idx < len(unified_text):
-            # We'll grab a chunk of up to chunk_size
-            end_idx = min(start_idx + chunk_size, len(unified_text))
-            chunk = unified_text[start_idx:end_idx]
-            pages.append(chunk)
+        while start_idx < len(content):
+            end_idx = min(start_idx + chunk_size, len(content))
+            chunks.append(content[start_idx:end_idx])
             start_idx += chunk_size
 
-        # Build the embed(s)
-        embeds = []
-        total_pages = len(pages)
-        for i, page_text in enumerate(pages, start=1):
+        # Build an embed for each chunk
+        pages = []
+        total = len(chunks)
+        for i, chunk in enumerate(chunks, start=1):
             embed = discord.Embed(
-                title=f"Crash Report (Page {i}/{total_pages})",
-                color=discord.Color.red()
+                title=f"{section_name} (Page {i}/{total})",
+                color=discord.Color.red(),
             )
-            # We put the chunk in code blocks
-            embed.add_field(name="Details", value=f"```{page_text}```", inline=False)
-            embeds.append(embed)
+            embed.add_field(name="Details", value=f"```{chunk}```", inline=False)
+            pages.append(embed)
 
-        return embeds
+        return pages
+
+    def build_all_pages_unified(
+        self,
+        exception_text: str | None,
+        stacktrace_text: str | None,
+        installed_modules_text: str | None,
+        link: str
+    ) -> list[discord.Embed]:
+        """
+        Build a single list of pages that covers:
+          1) Exception (split across pages if needed)
+          2) Enhanced Stacktrace
+          3) User's Modlist
+        Each chunk gets its own embed, but they're unified under a single paginator.
+        """
+        all_pages = []
+
+        # If absolutely nothing is found, produce a single "no data" page
+        if not any([exception_text, stacktrace_text, installed_modules_text]):
+            embed = discord.Embed(
+                title="No Crash Report Data Found",
+                description=f"Nothing extracted from {link}",
+                color=discord.Color.red(),
+            )
+            return [embed]
+
+        # 1) Exception
+        if exception_text:
+            exc_pages = self.build_section_pages("Exception", exception_text)
+            all_pages.extend(exc_pages)
+
+        # 2) Enhanced Stacktrace
+        if stacktrace_text:
+            stack_pages = self.build_section_pages("Enhanced Stacktrace", stacktrace_text)
+            all_pages.extend(stack_pages)
+
+        # 3) Installed Modules
+        if installed_modules_text:
+            modlist_pages = self.build_section_pages("User's Modlist", installed_modules_text)
+            all_pages.extend(modlist_pages)
+
+        # If we actually built no pages for some reason, show fallback
+        if not all_pages:
+            embed = discord.Embed(
+                title="No Crash Report Data Found",
+                description=f"Nothing extracted from {link}",
+                color=discord.Color.red(),
+            )
+            all_pages.append(embed)
+
+        return all_pages
 
     @commands.command(name="analyze")
     async def analyze_command(self, ctx, url: str):
         """
-        Command to analyze a media or webpage URL.
-        For crash reports: Unify all sections in one multi-page embed with buttons.
+        Analyze a crash report or media. For crash reports:
+        - Single unified paginator
+        - Pages for Exception, Stacktrace, Modlist
         """
-        # Check if it's a crash report URL
         if "report.butr.link" in url:
             data = await self.fetch_webpage(url)
             if "error" in data:
                 return await ctx.send(data["error"])
 
-            # Build the unified pages
-            pages = self.build_unified_pages(data, link=url)
-            if not pages:
-                return await ctx.send("No crash report content found.")
+            # Build a single list of pages
+            pages = self.build_all_pages_unified(
+                exception_text=data.get("exception") or "",
+                stacktrace_text=data.get("enhanced_stacktrace") or "",
+                installed_modules_text=data.get("installed_modules") or "",
+                link=url
+            )
 
-            # If only 1 page, just send a normal embed (no need for buttons)
+            # If only 1 page, send without buttons
             if len(pages) == 1:
                 return await ctx.send(embed=pages[0])
 
-            # Otherwise, send with pagination
-            view = PaginatedEmbeds(pages, invoker_id=ctx.author.id)
+            # Otherwise, set up the button-based pagination
+            view = PaginatedEmbeds(pages, ctx.author.id)
             await ctx.send(embed=pages[0], view=view)
 
         else:
-            # Handle image analysis instead
+            # Handle image analysis
             try:
                 async with self.session.get(url) as response:
                     if response.status != 200:
@@ -221,14 +291,11 @@ class MediaAnalyzer(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        """
-        Automatic handling of crash-report links or attachments in messages.
-        Same logic: unify everything into one set of pages.
-        """
+        """Auto-detect crash report links or attachments in messages."""
         if message.author.bot:
             return
 
-        # Look for crash-report links
+        # 1) Detect crash-report links
         urls = [word for word in message.content.split() if word.startswith("http")]
         for url in urls:
             if "report.butr.link" in url:
@@ -237,21 +304,22 @@ class MediaAnalyzer(commands.Cog):
                     await message.reply(data["error"])
                     return
 
-                # Build unified pages
-                pages = self.build_unified_pages(data, link=url)
-                if not pages:
-                    await message.reply("No crash report content found.")
-                    return
+                pages = self.build_all_pages_unified(
+                    exception_text=data.get("exception") or "",
+                    stacktrace_text=data.get("enhanced_stacktrace") or "",
+                    installed_modules_text=data.get("installed_modules") or "",
+                    link=url
+                )
 
-                # 1 page or multiple?
                 if len(pages) == 1:
                     await message.reply(embed=pages[0])
                 else:
-                    view = PaginatedEmbeds(pages, invoker_id=message.author.id)
+                    view = PaginatedEmbeds(pages, message.author.id)
                     await message.reply(embed=pages[0], view=view)
-                return
 
-        # If not a crash-report link, check attachments for images/html
+                return  # stop after handling the link
+
+        # 2) If no crash-report link, check attachments
         if message.attachments:
             for attachment in message.attachments:
                 # Image analysis
@@ -281,21 +349,20 @@ class MediaAnalyzer(commands.Cog):
                     except Exception as e:
                         await message.reply(f"Error analyzing the image: {e}")
 
-                # HTML crash-report file
+                # HTML crash-report file (optional)
                 elif attachment.filename.lower().endswith('.html'):
                     try:
                         html_bytes = await attachment.read()
                         html_content = html_bytes.decode('utf-8')
                         soup = BeautifulSoup(html_content, 'html.parser')
                         text = soup.get_text()
-                        # We could do the same chunking/pagination for HTML,
-                        # but here's a simple approach:
                         embed = discord.Embed(
                             title="Crash Report Analysis (HTML)",
                             description="Extracted text from the uploaded HTML crash report.",
                             color=discord.Color.blue(),
                         )
-                        truncated = text[:1024]  # Just for safety
+                        # Truncate if necessary
+                        truncated = text[:1024]
                         embed.add_field(name="Extracted Content", value=truncated, inline=False)
                         await message.reply(embed=embed)
                     except Exception as e:
