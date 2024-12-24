@@ -8,17 +8,24 @@ from io import BytesIO
 import aiohttp
 import re
 
-# Helper to chunk a list of embeds into sub-lists of up to 'size' (for pages).
+###############################################################################
+# Helper Functions
+###############################################################################
+
 def chunk_embeds(embeds: list[discord.Embed], size=10) -> list[list[discord.Embed]]:
     """
     Discord only allows up to 10 embeds in a single message.
     We split a large list of embed objects into sub-lists of up to 'size'.
     Each sub-list is one 'page'.
     """
-    chunks = []
+    pages = []
     for i in range(0, len(embeds), size):
-        chunks.append(embeds[i : i + size])
-    return chunks
+        pages.append(embeds[i : i + size])
+    return pages
+
+###############################################################################
+# Paginator
+###############################################################################
 
 class PaginatedEmbeds(View):
     """
@@ -62,12 +69,16 @@ class PaginatedEmbeds(View):
                 "You're already on the last page!", ephemeral=True
             )
 
+###############################################################################
+# The Cog
+###############################################################################
 
 class MediaAnalyzer(commands.Cog):
     """Analyze images, crash reports, and webpages for AI Assistant functionality."""
 
     def __init__(self, bot):
         self.bot = bot
+        # We'll create an aiohttp session to fetch the webpage for crash reports.
         self.session = aiohttp.ClientSession()
 
     async def cog_load(self) -> None:
@@ -84,8 +95,12 @@ class MediaAnalyzer(commands.Cog):
           - Exception
           - Enhanced Stacktrace
           - Installed Modules
-        We'll parse the text, locate these sections, and stop if we see
-        other known headings.
+
+        We'll parse the text with BeautifulSoup, then use regex to locate
+        the relevant sections, stopping if we see other known headings.
+
+        Returns a dict with keys: ["exception", "enhanced_stacktrace", "installed_modules"].
+        If an error occurs, returns {"error": "..."}.
         """
         try:
             async with self.session.get(url) as response:
@@ -151,7 +166,7 @@ class MediaAnalyzer(commands.Cog):
             return {"error": f"Error fetching webpage: {e}"}
 
     async def analyze_media(self, image_data: bytes) -> dict:
-        """Analyze image bytes with pytesseract."""
+        """Analyze image bytes with pytesseract (OCR)."""
         try:
             image = Image.open(BytesIO(image_data))
             text = pytesseract.image_to_string(image)
@@ -165,34 +180,43 @@ class MediaAnalyzer(commands.Cog):
 
     def build_embeds_for_section(self, section_name: str, content: str) -> list[discord.Embed]:
         """
-        Creates a list of Embeds for a given section, chunking
-        the text so no single field exceeds 1,024 characters
-        (to avoid the 'Field value must be <= 1024' error).
+        Create a list of Embeds for a given section by chunking
+        the text so no single field is over 1,024 chars, and we also
+        minimize the risk of exceeding the 6,000 character embed limit.
+
+        We'll pick ~990 as chunk size for the actual text, leaving
+        ~34 characters for triple-backticks plus a short title, etc.
         """
         content = content.strip()
         if not content:
             return []
 
-        # We'll chunk so each code-block is at most ~1,018 characters,
-        # because we add 6 more chars around it (``` + ```).
-        CHUNK_SIZE = 1018
-        chunks = []
+        # Enough buffer so we don't exceed 1024 in the field,
+        # plus we ensure we stay safely below the 6000 total embed limit.
+        CHUNK_SIZE = 990
+
+        lines = []
         start_idx = 0
         while start_idx < len(content):
             end_idx = min(start_idx + CHUNK_SIZE, len(content))
-            chunk = content[start_idx:end_idx]
-            chunks.append(chunk)
+            lines.append(content[start_idx:end_idx])
             start_idx += CHUNK_SIZE
 
         embeds = []
-        for i, chunk_text in enumerate(chunks, start=1):
+        for i, chunk_text in enumerate(lines, start=1):
+            # For the first chunk, embed title = section_name,
+            # otherwise leave it blank.
             embed_title = section_name if i == 1 else ""
             embed = discord.Embed(title=embed_title, color=discord.Color.blue())
+
+            # Each embed gets exactly one field containing the chunk,
+            # surrounded by triple backticks to format as code.
             embed.add_field(
                 name="",
                 value=f"```{chunk_text}```",
                 inline=False
             )
+
             embeds.append(embed)
 
         return embeds
@@ -205,9 +229,10 @@ class MediaAnalyzer(commands.Cog):
     ) -> list[list[discord.Embed]]:
         """
         Build a list of 'pages.' Each page = up to 10 Embeds.
-        1) Build embed-lists for each section.
-        2) If an embed-list > 10, chunk it with 'chunk_embeds()'.
-        3) Append those pages to a final list of pages.
+
+        1) Build embed-lists for each section (Exception, Enhanced Stacktrace, Modules).
+        2) If an embed-list > 10, chunk it with 'chunk_embeds(...)'.
+        3) Append those sub-lists to the final list of pages.
         """
         exc_embeds = self.build_embeds_for_section("Exception", exception_text)
         stack_embeds = self.build_embeds_for_section("Enhanced Stacktrace", stacktrace_text)
@@ -215,6 +240,7 @@ class MediaAnalyzer(commands.Cog):
 
         all_pages = []
 
+        # For each section's embed list, chunk into sets of 10
         if exc_embeds:
             for chunked_exc in chunk_embeds(exc_embeds, 10):
                 all_pages.append(chunked_exc)
@@ -243,6 +269,7 @@ class MediaAnalyzer(commands.Cog):
         """
         Command to analyze a crash report or an image link.
         """
+        # If it's a known crash report
         if "report.butr.link" in url.lower():
             data = await self.fetch_webpage(url)
             if "error" in data:
@@ -257,11 +284,12 @@ class MediaAnalyzer(commands.Cog):
             if len(pages) == 1:
                 return await ctx.send(embeds=pages[0])
 
+            # Otherwise, create the paginator
             view = PaginatedEmbeds(pages, ctx.author.id)
             await ctx.send(embeds=pages[0], view=view)
 
         else:
-            # Attempt to analyze an image with pytesseract
+            # Otherwise, assume it's an image link to be OCR'ed
             try:
                 async with self.session.get(url) as response:
                     if response.status != 200:
