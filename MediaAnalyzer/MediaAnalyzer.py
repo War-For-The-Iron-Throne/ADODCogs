@@ -87,7 +87,10 @@ class MediaAnalyzer(commands.Cog):
             embeds.append(embed)
 
         for embed in embeds:
-            await ctx_or_message.send(embed=embed)
+            if isinstance(ctx_or_message, discord.Message):
+                await ctx_or_message.reply(embed=embed)
+            else:
+                await ctx_or_message.send(embed=embed)
 
     @commands.command(name="analyze")
     async def analyze_command(self, ctx, url: str):
@@ -160,8 +163,6 @@ class MediaAnalyzer(commands.Cog):
                 if data["installed_modules"]:
                     await self.send_paginated_embeds(message, "User's Modlist", description, data["installed_modules"])
                 return
-
-        # Handle attachments as images or HTML files
         if message.attachments:
             for attachment in message.attachments:
                 if attachment.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
@@ -204,7 +205,6 @@ class MediaAnalyzer(commands.Cog):
                         await message.reply(embed=embed)
                     except Exception as e:
                         await message.reply(f"Error processing HTML file: {e}")
-
 
 async def setup(bot):
     """Proper async setup for the cog."""
