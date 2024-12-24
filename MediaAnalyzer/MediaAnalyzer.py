@@ -181,19 +181,18 @@ class MediaAnalyzer(commands.Cog):
     def build_embeds_for_section(self, section_name: str, content: str) -> list[discord.Embed]:
         """
         Create a list of Embeds for a given section by chunking
-        the text so no single field is over 1,024 chars, and we also
-        minimize the risk of exceeding the 6,000 character embed limit.
+        the text so no single embed goes beyond safe character limits.
+        We aim to prevent any one embed from exceeding 6000 total characters.
 
-        We'll pick ~990 as chunk size for the actual text, leaving
-        ~34 characters for triple-backticks plus a short title, etc.
+        We'll pick ~900-1000 as the chunk size for the actual text, leaving
+        room for triple-backticks, embed title, etc.
         """
         content = content.strip()
         if not content:
             return []
 
-        # Enough buffer so we don't exceed 1024 in the field,
-        # plus we ensure we stay safely below the 6000 total embed limit.
-        CHUNK_SIZE = 990
+        # Lower chunk size so we avoid going near Discord's 6000-character limit
+        CHUNK_SIZE = 900  # Adjusted down to give plenty of buffer
 
         lines = []
         start_idx = 0
