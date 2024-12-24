@@ -8,10 +8,12 @@ from io import BytesIO
 import aiohttp
 import re
 
+# 1) Helper function: chunk a list of embeds into lists of up to 'size' embeds each
 def chunk_embeds(embeds: list[discord.Embed], size=10) -> list[list[discord.Embed]]:
     """
     Discord only allows up to 10 embeds in a single message.
-    So if we have more than 10, we split them into multiple 'pages.'
+    We split a large list of embed objects into sub-lists of up to 'size'.
+    Each sub-list is one 'page'.
     """
     chunks = []
     for i in range(0, len(embeds), size):
@@ -20,12 +22,12 @@ def chunk_embeds(embeds: list[discord.Embed], size=10) -> list[list[discord.Embe
 
 class PaginatedEmbeds(View):
     """
-    A paginator that cycles through *pages*, where each page is
-    a list of up to 10 discord.Embed objects.
+    A paginator that cycles through 'pages,' where each page
+    is a list of up to 10 discord.Embed objects.
     """
     def __init__(self, pages: list[list[discord.Embed]], invoker_id: int):
         super().__init__(timeout=300)  # 5-minute timeout
-        self.pages = pages  # e.g. [ [embed1, embed2...], [embedX, embedY...] ]
+        self.pages = pages
         self.index = 0
         self.invoker_id = invoker_id
 
@@ -34,7 +36,7 @@ class PaginatedEmbeds(View):
         return interaction.user.id == self.invoker_id
 
     async def update_message(self, interaction: discord.Interaction):
-        # We must edit the original message with up to 10 embeds:
+        # We'll edit the original message with the new embeds
         await interaction.response.edit_message(
             embeds=self.pages[self.index],
             view=self
@@ -46,7 +48,6 @@ class PaginatedEmbeds(View):
             self.index -= 1
             await self.update_message(interaction)
         else:
-            # Already on first page, can't go back further.
             await interaction.followup.send(
                 "You're already on the first page!", ephemeral=True
             )
@@ -60,6 +61,7 @@ class PaginatedEmbeds(View):
             await interaction.followup.send(
                 "You're already on the last page!", ephemeral=True
             )
+
 
 class MediaAnalyzer(commands.Cog):
     """Analyze images, crash reports, and webpages for AI Assistant functionality."""
@@ -83,7 +85,7 @@ class MediaAnalyzer(commands.Cog):
           - Enhanced Stacktrace
           - Installed Modules
         We'll parse the text, locate these sections, and stop if we see
-        any other known headings (so it doesn't mix them together).
+        other known headings.
         """
         try:
             async with self.session.get(url) as response:
@@ -129,15 +131,12 @@ class MediaAnalyzer(commands.Cog):
                 installed_modules_text = ""
                 if modules_match:
                     modules_block = modules_match.group(1)
-
-                    # Grab every line that starts with + or -, ignoring parentheses,
-                    # so we get each mod's display line:
+                    # We'll capture lines starting with + or - up to '(' or line-end
                     mod_lines = re.findall(
                         r"^[+-]\s+(.*?)(?:\(|$)",
                         modules_block,
                         re.MULTILINE
                     )
-                    # Clean up the mod lines:
                     mod_names = [m.strip() for m in mod_lines if m.strip()]
                     if mod_names:
                         installed_modules_text = "\n".join(mod_names)
@@ -166,14 +165,15 @@ class MediaAnalyzer(commands.Cog):
 
     def build_embeds_for_section(self, section_name: str, content: str) -> list[discord.Embed]:
         """
-        Break up a section's content into multiple Embeds (1k chunk each),
-        so no single embed field is too large.
+        Creates a list of Embeds for a given section, chunking
+        the text so no embed exceeds ~6000 total characters.
+        We'll use ~5800 for the chunk to leave some overhead.
         """
         content = content.strip()
         if not content:
             return []
 
-        CHUNK_SIZE = 1024 - 10  # overhead for code block formatting
+        CHUNK_SIZE = 5800  # leave some room for title, code blocks, etc.
         chunks = []
         start_idx = 0
         while start_idx < len(content):
@@ -202,33 +202,29 @@ class MediaAnalyzer(commands.Cog):
         installed_modules_text: str
     ) -> list[list[discord.Embed]]:
         """
-        Build a list of 'pages.' Each page is a list of up to 10 Embeds.
+        Build a list of 'pages.' Each page = up to 10 Embeds.
 
-        Steps:
-          1) Build embed-lists for each section (Exception, Enhanced Stacktrace, etc.)
-          2) If an embed-list has more than 10, chunk it further.
-          3) Each chunk is a 'page.'
+        1) Build embed-lists for each section.
+        2) If an embed-list > 10, chunk it with chunk_embeds().
+        3) Append those pages to a final list of pages.
         """
-        # Build each section's embed objects
         exc_embeds = self.build_embeds_for_section("Exception", exception_text)
         stack_embeds = self.build_embeds_for_section("Enhanced Stacktrace", stacktrace_text)
         mods_embeds = self.build_embeds_for_section("Installed Modules", installed_modules_text)
 
-        # We'll create a final pages list
         all_pages = []
 
-        # For each section, chunk its embeds in groups of 10.
         if exc_embeds:
-            for chunked in chunk_embeds(exc_embeds, 10):
-                all_pages.append(chunked)
+            for chunked_exc in chunk_embeds(exc_embeds, 10):
+                all_pages.append(chunked_exc)
 
         if stack_embeds:
-            for chunked in chunk_embeds(stack_embeds, 10):
-                all_pages.append(chunked)
+            for chunked_stack in chunk_embeds(stack_embeds, 10):
+                all_pages.append(chunked_stack)
 
         if mods_embeds:
-            for chunked in chunk_embeds(mods_embeds, 10):
-                all_pages.append(chunked)
+            for chunked_mods in chunk_embeds(mods_embeds, 10):
+                all_pages.append(chunked_mods)
 
         if not all_pages:
             empty_embed = discord.Embed(
@@ -244,7 +240,6 @@ class MediaAnalyzer(commands.Cog):
     async def analyze_command(self, ctx, url: str):
         """
         Command to analyze a crash report or an image link.
-        If it's a known crash report link, parse the sections. Otherwise, try to OCR an image.
         """
         if "report.butr.link" in url.lower():
             data = await self.fetch_webpage(url)
@@ -256,16 +251,15 @@ class MediaAnalyzer(commands.Cog):
             mods_text = data.get("installed_modules", "")
 
             pages = self.build_pages(exception_text, stacktrace_text, mods_text)
-            # If there's only one page, no next/prev needed
+            # If there's only 1 page, no need for pagination
             if len(pages) == 1:
                 return await ctx.send(embeds=pages[0])
 
-            # Use paginator
             view = PaginatedEmbeds(pages, ctx.author.id)
             await ctx.send(embeds=pages[0], view=view)
 
         else:
-            # Attempt to OCR an image
+            # Attempt to analyze an image with pytesseract
             try:
                 async with self.session.get(url) as response:
                     if response.status != 200:
@@ -297,8 +291,8 @@ class MediaAnalyzer(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         """
-        Auto-detect crash report links in messages.
-        Build all pages and send them if found.
+        Auto-detect crash report links in messages, parse them,
+        and show the results in multiple pages if necessary.
         """
         if message.author.bot:
             return
@@ -323,7 +317,7 @@ class MediaAnalyzer(commands.Cog):
                     await message.reply(embeds=pages[0], view=view)
 
                 return
-        # Otherwise do nothing if no crash links.
+        # Otherwise do nothing if no crash link.
 
 async def setup(bot):
     cog = MediaAnalyzer(bot)
