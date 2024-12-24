@@ -3,18 +3,29 @@ from discord.ext import commands
 from PIL import Image
 import pytesseract
 from io import BytesIO
+import aiohttp
+
 
 class MediaAnalyzer(commands.Cog):
     """Analyze images and GIFs for AI Assistant functionality."""
 
     def __init__(self, bot):
         self.bot = bot
+        self.session = aiohttp.ClientSession()
+
+    async def cog_load(self) -> None:
+        """Executed when the cog is loaded."""
+        print("MediaAnalyzer cog has been loaded successfully.")
+
+    async def cog_unload(self) -> None:
+        """Executed when the cog is unloaded."""
+        await self.session.close()
+        print("MediaAnalyzer cog has been unloaded and resources cleaned up.")
 
     async def analyze_media(self, url: str, *args, **kwargs) -> dict:
         """Analyzes media from a given URL for text and content."""
         try:
-            # Fetch the image
-            async with self.bot.session.get(url) as response:
+            async with self.session.get(url) as response:
                 if response.status != 200:
                     return {"error": "Failed to fetch the media."}
 
@@ -23,7 +34,7 @@ class MediaAnalyzer(commands.Cog):
                     return {"error": "The provided URL does not point to an image."}
 
                 image_data = BytesIO(await response.read())
-            
+
             # Analyze the image
             image = Image.open(image_data)
             text = pytesseract.image_to_string(image)
@@ -73,5 +84,6 @@ class MediaAnalyzer(commands.Cog):
         }
         await cog.register_function(cog_name="MediaAnalyzer", schema=schema)
 
-async def setup(bot):
+
+async def setup(bot: commands.Bot):
     await bot.add_cog(MediaAnalyzer(bot))
