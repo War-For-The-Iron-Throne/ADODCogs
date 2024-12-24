@@ -62,32 +62,38 @@ class MediaAnalyzer(commands.Cog):
         except Exception as e:
             return {"error": f"Failed to analyze image: {e}"}
 
-async def send_paginated_embeds(self, ctx_or_message, title, description, content):
-    """Send content in paginated embeds, ensuring each field complies with Discord's character limits."""
-    MAX_EMBED_FIELD_LENGTH = 1024
-    MAX_CONTENT_LENGTH = MAX_EMBED_FIELD_LENGTH - 30  # Reserve space for formatting and newlines
+    async def send_paginated_embeds(self, ctx_or_message, title, description, content):
+        """
+        Send content in paginated embeds, ensuring each field is within Discord's 1024-char limit.
+        We account for code-block formatting to avoid surpassing 1024 characters.
+        """
+        MAX_EMBED_FIELD_LENGTH = 1024
+        # Reserve space for the ``` (6 characters) plus a little buffer for newlines.
+        CHARS_FOR_CODEBLOCK = 6
+        # So the max chunk length is 1024 - 6 = 1018.
+        # If you want additional safety for newlines, you could lower this further (e.g., 1015).
+        MAX_CONTENT_LENGTH = MAX_EMBED_FIELD_LENGTH - CHARS_FOR_CODEBLOCK
 
-    embeds = []
-    chunks = [content[i:i + MAX_CONTENT_LENGTH] for i in range(0, len(content), MAX_CONTENT_LENGTH)]
-    for idx, chunk in enumerate(chunks):
-        # Truncate chunk if it exceeds the allowed length with formatting
-        if len(chunk) > MAX_CONTENT_LENGTH:
-            chunk = chunk[:MAX_CONTENT_LENGTH]
+        embeds = []
+        chunks = [content[i : i + MAX_CONTENT_LENGTH] for i in range(0, len(content), MAX_CONTENT_LENGTH)]
+        for idx, chunk in enumerate(chunks):
+            # Truncate chunk if it somehow exceeds the allowed length with formatting
+            if len(chunk) > MAX_CONTENT_LENGTH:
+                chunk = chunk[:MAX_CONTENT_LENGTH]
 
-        embed = discord.Embed(
-            title=f"{title} (Part {idx + 1}/{len(chunks)})",
-            description=description if idx == 0 else None,
-            color=discord.Color.red()
-        )
-        embed.add_field(name="Details", value=f"```{chunk}```", inline=False)
-        embeds.append(embed)
+            embed = discord.Embed(
+                title=f"{title} (Part {idx + 1}/{len(chunks)})",
+                description=description if idx == 0 else None,
+                color=discord.Color.red(),
+            )
+            embed.add_field(name="Details", value=f"```{chunk}```", inline=False)
+            embeds.append(embed)
 
-    for embed in embeds:
-        if isinstance(ctx_or_message, discord.Message):
-            await ctx_or_message.reply(embed=embed)
-        else:
-            await ctx_or_message.send(embed=embed)
-
+        for embed in embeds:
+            if isinstance(ctx_or_message, discord.Message):
+                await ctx_or_message.reply(embed=embed)
+            else:
+                await ctx_or_message.send(embed=embed)
 
     @commands.command(name="analyze")
     async def analyze_command(self, ctx, url: str):
@@ -143,6 +149,7 @@ async def send_paginated_embeds(self, ctx_or_message, title, description, conten
         if message.author.bot:
             return
 
+        # Look for URLs in the message content
         urls = [word for word in message.content.split() if word.startswith("http")]
         for url in urls:
             if "report.butr.link" in url:
@@ -160,6 +167,8 @@ async def send_paginated_embeds(self, ctx_or_message, title, description, conten
                 if data["installed_modules"]:
                     await self.send_paginated_embeds(message, "User's Modlist", description, data["installed_modules"])
                 return
+
+        # Look for attachments in the message
         if message.attachments:
             for attachment in message.attachments:
                 if attachment.filename.lower().endswith(('.png', '.jpg', '.jpeg', '.webp')):
@@ -198,6 +207,7 @@ async def send_paginated_embeds(self, ctx_or_message, title, description, conten
                             description="Extracted text from the uploaded HTML crash report.",
                             color=discord.Color.blue(),
                         )
+                        # Truncate if needed to avoid any embed overflow
                         embed.add_field(name="Extracted Content", value=text[:1024], inline=False)
                         await message.reply(embed=embed)
                     except Exception as e:
