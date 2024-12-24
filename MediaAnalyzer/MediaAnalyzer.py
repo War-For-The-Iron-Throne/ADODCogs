@@ -8,7 +8,7 @@ from io import BytesIO
 import aiohttp
 import re
 
-# 1) Helper function: chunk a list of embeds into lists of up to 'size' embeds each
+# Helper to chunk a list of embeds into sub-lists of up to 'size' (for pages).
 def chunk_embeds(embeds: list[discord.Embed], size=10) -> list[list[discord.Embed]]:
     """
     Discord only allows up to 10 embeds in a single message.
@@ -32,7 +32,7 @@ class PaginatedEmbeds(View):
         self.invoker_id = invoker_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        # Only allow the original user to use the paginator.
+        # Only allow the original user to use this paginator.
         return interaction.user.id == self.invoker_id
 
     async def update_message(self, interaction: discord.Interaction):
@@ -166,14 +166,16 @@ class MediaAnalyzer(commands.Cog):
     def build_embeds_for_section(self, section_name: str, content: str) -> list[discord.Embed]:
         """
         Creates a list of Embeds for a given section, chunking
-        the text so no embed exceeds ~6000 total characters.
-        We'll use ~5800 for the chunk to leave some overhead.
+        the text so no single field exceeds 1,024 characters
+        (to avoid the 'Field value must be <= 1024' error).
         """
         content = content.strip()
         if not content:
             return []
 
-        CHUNK_SIZE = 5800  # leave some room for title, code blocks, etc.
+        # We'll chunk so each code-block is at most ~1,018 characters,
+        # because we add 6 more chars around it (``` + ```).
+        CHUNK_SIZE = 1018
         chunks = []
         start_idx = 0
         while start_idx < len(content):
@@ -203,9 +205,8 @@ class MediaAnalyzer(commands.Cog):
     ) -> list[list[discord.Embed]]:
         """
         Build a list of 'pages.' Each page = up to 10 Embeds.
-
         1) Build embed-lists for each section.
-        2) If an embed-list > 10, chunk it with chunk_embeds().
+        2) If an embed-list > 10, chunk it with 'chunk_embeds()'.
         3) Append those pages to a final list of pages.
         """
         exc_embeds = self.build_embeds_for_section("Exception", exception_text)
@@ -226,6 +227,7 @@ class MediaAnalyzer(commands.Cog):
             for chunked_mods in chunk_embeds(mods_embeds, 10):
                 all_pages.append(chunked_mods)
 
+        # If no sections had anything, show a single 'No Data' page
         if not all_pages:
             empty_embed = discord.Embed(
                 title="No Crash Report Data Found",
