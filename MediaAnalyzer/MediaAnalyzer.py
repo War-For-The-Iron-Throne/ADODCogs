@@ -66,24 +66,15 @@ class MediaAnalyzer(commands.Cog):
         """Send content in paginated embeds if it exceeds the Discord field length limits."""
         MAX_EMBED_FIELD_LENGTH = 1024
 
+        chunks = [content[i:i + MAX_EMBED_FIELD_LENGTH] for i in range(0, len(content), MAX_EMBED_FIELD_LENGTH)]
         embeds = []
-        if len(content) > MAX_EMBED_FIELD_LENGTH:
-            chunks = [content[i:i + MAX_EMBED_FIELD_LENGTH] for i in range(0, len(content), MAX_EMBED_FIELD_LENGTH)]
-            for idx, chunk in enumerate(chunks):
-                embed = discord.Embed(
-                    title=f"{title} (Part {idx + 1}/{len(chunks)})",
-                    description=description if idx == 0 else None,
-                    color=discord.Color.red()
-                )
-                embed.add_field(name="Details", value=f"```{chunk}```", inline=False)
-                embeds.append(embed)
-        else:
+        for idx, chunk in enumerate(chunks):
             embed = discord.Embed(
-                title=title,
-                description=description,
+                title=f"{title} (Part {idx + 1}/{len(chunks)})",
+                description=description if idx == 0 else None,
                 color=discord.Color.red(),
             )
-            embed.add_field(name="Details", value=f"```{content}```", inline=False)
+            embed.add_field(name="Details", value=f"```{chunk}```", inline=False)
             embeds.append(embed)
 
         for embed in embeds:
