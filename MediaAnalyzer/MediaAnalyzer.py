@@ -35,7 +35,7 @@ class MediaAnalyzer(commands.Cog):
                 soup = BeautifulSoup(html_content, "html.parser")
                 full_text = soup.get_text()
 
-                # Extract "Exception," "Enhanced Stacktrace," and "Installed Modules"
+                # Extract specific sections
                 exception_match = re.search(r"\+ Exception\n(.+?)(?=\n\n|\Z)", full_text, re.DOTALL)
                 enhanced_stacktrace_match = re.search(r"\+ Enhanced Stacktrace\n(.+?)(?=\n\n|\Z)", full_text, re.DOTALL)
                 installed_modules_match = re.search(r"\+ Installed Modules\n(.+?)(?=\n\n|\Z)", full_text, re.DOTALL)
@@ -72,10 +72,10 @@ class MediaAnalyzer(commands.Cog):
             for idx, chunk in enumerate(chunks):
                 embed = discord.Embed(
                     title=f"{title} (Part {idx + 1}/{len(chunks)})",
-                    description=description,
+                    description=description if idx == 0 else None,
                     color=discord.Color.red()
                 )
-                embed.add_field(name=title, value=f"```{chunk}```", inline=False)
+                embed.add_field(name="Details", value=f"```{chunk}```", inline=False)
                 embeds.append(embed)
         else:
             embed = discord.Embed(
@@ -83,7 +83,7 @@ class MediaAnalyzer(commands.Cog):
                 description=description,
                 color=discord.Color.red(),
             )
-            embed.add_field(name=title, value=f"```{content}```", inline=False)
+            embed.add_field(name="Details", value=f"```{content}```", inline=False)
             embeds.append(embed)
 
         for embed in embeds:
@@ -205,6 +205,7 @@ class MediaAnalyzer(commands.Cog):
                         await message.reply(embed=embed)
                     except Exception as e:
                         await message.reply(f"Error processing HTML file: {e}")
+
 
 async def setup(bot):
     """Proper async setup for the cog."""
