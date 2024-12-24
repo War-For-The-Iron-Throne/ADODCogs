@@ -25,16 +25,15 @@ def embed_size(embed: discord.Embed) -> int:
 def build_embeds_for_section(section_name: str, content: str) -> list[discord.Embed]:
     """
     Break 'content' into multiple embeds (each with up to 10 fields, each field <= 1000 chars).
-    We also ensure that each embed doesn't exceed 6000 total JSON-serialized characters.
+    We also ensure each embed doesn't exceed 6000 total JSON-serialized characters.
 
     Steps:
       1. Sanitize triple backticks (replace them).
-      2. Wrap the text by splitting into lines of ~80 chars.
-      3. Accumulate lines into a 'current_field' until:
-         - adding another line would exceed 1000 chars, or
-         - we have 10 fields in the embed, or
-         - adding the field would exceed the embed's 6000-char limit.
-      4. Move to the next embed as needed.
+      2. Split the text into lines of max ~80 chars each.
+      3. Accumulate lines for one field until adding another line would exceed 1000.
+      4. Before finalizing that field in the embed, do a test copy and measure its JSON size.
+         If it would exceed 6000, we push the current embed and start a new one.
+      5. Continue until all lines are processed.
     """
     content = content.strip()
     if not content:
@@ -43,73 +42,65 @@ def build_embeds_for_section(section_name: str, content: str) -> list[discord.Em
     # Replace triple backticks so we don't nest code blocks
     content = content.replace("```", "'''")
 
-    # We'll break content into lines no longer than ~80 chars
-    # so we can easily accumulate them into fields.
+    # Break the text into lines no longer than 80 chars.
     lines = []
     for raw_line in content.splitlines():
         raw_line = raw_line.strip("\r")
-        # further split if the line is very long
         while len(raw_line) > 80:
             lines.append(raw_line[:80])
             raw_line = raw_line[80:]
         if raw_line:
             lines.append(raw_line)
 
+    # Prepare to build embeds
     embeds = []
     embed = discord.Embed(title=section_name, color=discord.Color.blue())
+    used_title = False  # So the first embed in each section gets a title; subsequent do not
     field_count = 0
-    used_title = False  # We only want the first embed in this section to have the title
     current_field_lines = []
 
-    def finalize_field_to_embed(embed_obj: discord.Embed, field_lines: list[str]) -> bool:
+    def finalize_field_into_embed(embed_obj: discord.Embed, lines_for_field: list[str]) -> bool:
         """
-        Take the accumulated lines, form a code block, then add it as a field
-        to embed_obj. Returns True if the field was successfully added, False
-        if it couldn't fit (so we should start a new embed).
+        Convert lines_for_field -> single code block field, then test adding it to embed_obj.
+        Returns True if it fits, False if we need a new embed.
         """
-        field_text = "\n".join(field_lines)
-        field_text = f"```{field_text}```"  # wrap with code fences
+        field_text = "\n".join(lines_for_field)
+        # Wrap in code fences
+        field_text = f"```{field_text}```"
 
-        # We do a *test embed* to check size before adding permanently.
         test_embed = copy.deepcopy(embed_obj)
         test_embed.add_field(name="\u200b", value=field_text, inline=False)
 
         if embed_size(test_embed) <= 6000:
-            # It's safe to add
+            # It's safe
             embed_obj.add_field(name="\u200b", value=field_text, inline=False)
             return True
         return False
 
     for line in lines:
-        # Check if adding `line` to current_field_lines would exceed 1000
-        tentative_field_text = "\n".join(current_field_lines + [line])
-        if len(tentative_field_text) > 1000:
-            # We must finalize the current field
+        new_field_text = "\n".join(current_field_lines + [line])
+        if len(new_field_text) > 1000:
+            # That means we must finalize the current field now
             if current_field_lines:
-                # Attempt to add to embed
-                added_ok = finalize_field_to_embed(embed, current_field_lines)
+                added_ok = finalize_field_into_embed(embed, current_field_lines)
                 if not added_ok:
-                    # If even the existing lines can't fit, that means the embed is already full
-                    # We push the embed to the list only if it has fields, or if it's the first
+                    # The embed is already too large with the current lines.
+                    # That means we push this embed if it has content
                     if field_count > 0 or (embed.title and embed.description):
                         embeds.append(embed)
-                    # start a new embed
-                    embed = discord.Embed(
-                        color=discord.Color.blue()
-                    )
+                    # Start a fresh embed
+                    embed = discord.Embed(color=discord.Color.blue())
                     if not used_title:
                         embed.title = section_name
                         used_title = True
-                    finalize_field_to_embed(embed, current_field_lines)
-                    field_count = len(embed.fields)
+                    finalize_field_into_embed(embed, current_field_lines)
+                # update the field_count
+                field_count = len(embed.fields)
 
-                else:
-                    field_count += 1
-
-            # Now we start a new field with the new line
+            # Now start a fresh field with [line]
             current_field_lines = [line]
 
-            # If we already have 10 fields in this embed, or the embed is at limit, we start fresh
+            # If we've already got 10 fields, push embed & start a new one
             if field_count >= 10:
                 embeds.append(embed)
                 embed = discord.Embed(color=discord.Color.blue())
@@ -119,29 +110,25 @@ def build_embeds_for_section(section_name: str, content: str) -> list[discord.Em
                 field_count = 0
             continue
 
-        # If we won't exceed 1000 chars, we just accumulate the line
+        # If we won't exceed 1000 chars, accumulate the line
         current_field_lines.append(line)
-        # After adding the line, check if we might blow up the embed by finalizing it
-        # only if we need to finalize right now... otherwise we keep going
-
-        # If we already have 10 fields, we can't add more fields to this embed
-        # so we finalize the current lines right now
+        # We check if we already have 10 fields. If so, we need to finalize immediately
         if field_count >= 10:
-            # finalize whatever is in current_field_lines
+            # finalize what we have
             if current_field_lines:
-                added_ok = finalize_field_to_embed(embed, current_field_lines)
+                added_ok = finalize_field_into_embed(embed, current_field_lines)
                 if not added_ok:
-                    # if it didn't fit, new embed
                     if field_count > 0 or (embed.title and embed.description):
                         embeds.append(embed)
                     embed = discord.Embed(color=discord.Color.blue())
                     if not used_title:
                         embed.title = section_name
                         used_title = True
-                    finalize_field_to_embed(embed, current_field_lines)
+                    finalize_field_into_embed(embed, current_field_lines)
                 field_count = len(embed.fields)
                 current_field_lines = []
-            # push this embed and start a new one
+
+            # push the embed
             embeds.append(embed)
             embed = discord.Embed(color=discord.Color.blue())
             if not used_title:
@@ -149,27 +136,28 @@ def build_embeds_for_section(section_name: str, content: str) -> list[discord.Em
                 used_title = True
             field_count = 0
 
-    # After the loop, if there's anything left in current_field_lines, finalize it
+    # After processing lines, if anything remains in current_field_lines, finalize it
     if current_field_lines:
-        added_ok = finalize_field_to_embed(embed, current_field_lines)
+        added_ok = finalize_field_into_embed(embed, current_field_lines)
         if not added_ok:
-            # If we can't fit it in the current embed, push the current embed if it has something
             if field_count > 0 or (embed.title and embed.description):
                 embeds.append(embed)
             embed = discord.Embed(color=discord.Color.blue())
             if not used_title:
                 embed.title = section_name
                 used_title = True
-            finalize_field_to_embed(embed, current_field_lines)
+            finalize_field_into_embed(embed, current_field_lines)
+            field_count = len(embed.fields)
+        else:
             field_count = len(embed.fields)
 
-    # If the embed has fields (or a title), add it
+    # Finally, if this embed has any fields at all, push it
     if len(embed.fields) > 0 or (embed.title and embed.description):
         if embed_size(embed) <= 6000:
             embeds.append(embed)
         else:
-            # This scenario would be extremely rare (e.g. one field is huge)
-            # but we chunked the field down, so it should rarely happen.
+            # This is extremely rare if we have a single field that alone is too big,
+            # but we've already chunked lines to 80 chars, so it should not happen
             pass
 
     return embeds
@@ -177,8 +165,7 @@ def build_embeds_for_section(section_name: str, content: str) -> list[discord.Em
 def chunk_embeds(embeds: list[discord.Embed], size=10) -> list[list[discord.Embed]]:
     """
     Discord only allows up to 10 embeds in a single message.
-    We split a list of Embeds into sub-lists of up to 'size' each.
-    Each sub-list is one "page" in the paginator.
+    We split a list of Embeds into sub-lists of size <= 10.
     """
     pages = []
     for i in range(0, len(embeds), size):
@@ -191,8 +178,8 @@ def chunk_embeds(embeds: list[discord.Embed], size=10) -> list[list[discord.Embe
 
 class PaginatedEmbeds(View):
     """
-    A paginator that cycles through 'pages,' where each page
-    is a list of up to 10 discord.Embed objects.
+    A simple paginator that cycles through pages (a list of embed-lists).
+    Each page can have up to 10 Embeds.
     """
     def __init__(self, pages: list[list[discord.Embed]], invoker_id: int):
         super().__init__(timeout=300)  # 5-minute timeout
@@ -205,7 +192,7 @@ class PaginatedEmbeds(View):
         return interaction.user.id == self.invoker_id
 
     async def update_message(self, interaction: discord.Interaction):
-        # We'll edit the original message with the new embeds
+        # We'll edit the original message with the new page
         await interaction.response.edit_message(
             embeds=self.pages[self.index],
             view=self
@@ -261,8 +248,13 @@ class MediaAnalyzer(commands.Cog):
         We'll parse the text with BeautifulSoup, then use regex to locate
         the relevant sections, stopping if we see other known headings.
 
-        Returns a dict with keys: ["exception", "enhanced_stacktrace", "installed_modules"].
-        If an error occurs, returns {"error": "..."}.
+        Returns a dict with:
+          {
+            "exception": <str>,
+            "enhanced_stacktrace": <str>,
+            "installed_modules": <str>
+          }
+        or {"error": "..."} upon failure.
         """
         try:
             async with self.session.get(url) as response:
@@ -351,8 +343,7 @@ class MediaAnalyzer(commands.Cog):
 
         For each section (Exception, Enhanced Stacktrace, Modules),
         we create multiple embeds via build_embeds_for_section(...).
-        Then we combine all those embeds into a single list, and chunk them
-        in groups of 10 to form the final "pages" for pagination.
+        Then combine them all and chunk them in groups of 10.
         """
         exc_embeds = build_embeds_for_section("Exception", exception_text)
         stack_embeds = build_embeds_for_section("Enhanced Stacktrace", stacktrace_text)
@@ -387,7 +378,7 @@ class MediaAnalyzer(commands.Cog):
             mods_text = data.get("installed_modules", "")
 
             pages = self.build_pages(exception_text, stacktrace_text, mods_text)
-            # If there's only 1 page, no need for pagination
+            # If there's only 1 "page," no need for the paginator
             if len(pages) == 1:
                 return await ctx.send(embeds=pages[0])
 
@@ -434,7 +425,6 @@ class MediaAnalyzer(commands.Cog):
         if message.author.bot:
             return
 
-        # Detect URLs
         urls = [word for word in message.content.split() if word.startswith("http")]
         for url in urls:
             if "report.butr.link" in url.lower():
