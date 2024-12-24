@@ -63,13 +63,17 @@ class MediaAnalyzer(commands.Cog):
             return {"error": f"Failed to analyze image: {e}"}
 
 async def send_paginated_embeds(self, ctx_or_message, title, description, content):
-    """Send content in paginated embeds if it exceeds the Discord field length limits."""
+    """Send content in paginated embeds, ensuring each field complies with Discord's character limits."""
     MAX_EMBED_FIELD_LENGTH = 1024
-    MAX_CONTENT_LENGTH = MAX_EMBED_FIELD_LENGTH - 6  # Account for the added ``` markdown
+    MAX_CONTENT_LENGTH = MAX_EMBED_FIELD_LENGTH - 30  # Reserve space for formatting and newlines
 
     embeds = []
     chunks = [content[i:i + MAX_CONTENT_LENGTH] for i in range(0, len(content), MAX_CONTENT_LENGTH)]
     for idx, chunk in enumerate(chunks):
+        # Truncate chunk if it exceeds the allowed length with formatting
+        if len(chunk) > MAX_CONTENT_LENGTH:
+            chunk = chunk[:MAX_CONTENT_LENGTH]
+
         embed = discord.Embed(
             title=f"{title} (Part {idx + 1}/{len(chunks)})",
             description=description if idx == 0 else None,
