@@ -10,22 +10,27 @@ import re
 
 def extract_section(full_text: str, section_name: str, other_sections: list[str]) -> str:
     """
-    Extract everything from `+ {section_name}` until we hit `+ {some other section}`
+    Extract everything from `section_name` until we hit `other_sections`
     or the end of the file, ignoring lines like '+ IL:'.
-    Using a regex that says:
-      (?s)       => dot matches newlines
-      \+ {section_name}\s+ => matches the line "+ SomeSection"
-      (.*?)      => capture everything non-greedily
-      (?=        => lookahead for
-         \+ (?:{other_sections joined by |})
-         | \Z
-      )
-    If not found, return an empty string.
+    The section header can be prefixed with either '+' or '-'.
+
+    Args:
+        full_text (str): The complete text to search within.
+        section_name (str): The name of the section to extract.
+        other_sections (list[str]): Names of other sections to stop at.
+
+    Returns:
+        str: The extracted section content or an empty string if not found.
     """
     # If no "other sections" were provided, we might just stop at the end (\Z)
     if not other_sections:
         other_sections = []
-    pattern = rf"(?s)\+ {re.escape(section_name)}\s+(.*?)(?=\+ (?:{'|'.join(other_sections)})|\Z)"
+    # Allow for '+' or '-' prefixes
+    prefix_pattern = r"[+-]"
+    # Escape section names to handle any regex special characters
+    escaped_section = re.escape(section_name)
+    escaped_other_sections = '|'.join(re.escape(sec) for sec in other_sections)
+    pattern = rf"(?s){prefix_pattern}\s+{escaped_section}\s*(.*?)\s*(?={prefix_pattern}\s+(?:{escaped_other_sections})|\Z)"
     match = re.search(pattern, full_text)
     return match.group(1).strip() if match else ""
 
@@ -93,6 +98,12 @@ class MediaAnalyzer(commands.Cog):
          - Enhanced Stacktrace
          - Installed Modules
         in a way that doesn't break on '+ IL:' lines or short-circuit after 1 mod.
+
+        Args:
+            url (str): The URL of the crash report.
+
+        Returns:
+            dict: A dictionary containing extracted sections or an error message.
         """
         try:
             async with self.session.get(url) as response:
@@ -102,9 +113,9 @@ class MediaAnalyzer(commands.Cog):
                 html_content = await response.text()
                 full_text = BeautifulSoup(html_content, "html.parser").get_text()
 
-                # We'll define the other sections that might appear:
+                # Define the sections that might appear
                 sections = ["Exception", "Enhanced Stacktrace", "Installed Modules"]
-                # We'll individually extract each one by name
+                # Individually extract each section by name
 
                 exception_text = extract_section(
                     full_text,
@@ -122,19 +133,14 @@ class MediaAnalyzer(commands.Cog):
                     other_sections=["Exception", "Enhanced Stacktrace"]
                 )
 
-                # Now parse out the mod lines from modules_text
-                # We might have lines like:
-                # + Harmony (Bannerlord.Harmony, v2.3.3.207)
-                # + ButterLib (Bannerlord.ButterLib, v2.9.18.0)
-                # ...
-                # We want to see them all, not just the first.
+                # Parse out the mod lines from modules_text
+                # Lines like: "+ Harmony (Bannerlord.Harmony, v2.3.3.207)"
                 mods_found = []
                 for line in modules_text.splitlines():
                     line = line.strip()
-                    # e.g. "+ Harmony (Bannerlord.Harmony, v2.3.3.207)"
-                    if line.startswith("+ "):
-                        # Let's capture everything after '+ ' up until '(' or end
-                        m = re.match(r"\+\s+(.*?)(?:\(|$)", line)
+                    if line.startswith("+ ") or line.startswith("- "):
+                        # Capture everything after '+ ' or '- ' up until '(' or end
+                        m = re.match(r"[+-]\s+(.*?)(?:\s*\(|$)", line)
                         if m:
                             name = m.group(1).strip()
                             if name:
@@ -152,7 +158,14 @@ class MediaAnalyzer(commands.Cog):
             return {"error": f"Error fetching webpage: {e}"}
 
     async def analyze_media(self, image_data: bytes) -> dict:
-        """Analyze image bytes with pytesseract."""
+        """Analyze image bytes with pytesseract.
+
+        Args:
+            image_data (bytes): The image data to analyze.
+
+        Returns:
+            dict: A dictionary containing extracted text and image resolution or an error message.
+        """
         try:
             image = Image.open(BytesIO(image_data))
             text = pytesseract.image_to_string(image)
@@ -168,20 +181,23 @@ class MediaAnalyzer(commands.Cog):
         """
         Break up the content for one section into multiple embeds (if necessary).
         - The first chunk has a title; subsequent chunks are blank so it reads seamlessly.
+
+        Args:
+            section_title (str): The title of the section.
+            content (str): The content of the section.
+
+        Returns:
+            list[discord.Embed]: A list of Discord embed objects.
         """
         content = content.strip()
         if not content:
             return []
 
         CHUNK_SIZE = 1024 - 10  # leave space for code blocks, newlines
-        lines = content
-        # We'll do a simple character-based chunking (since some lines can be quite long).
-        chunks = []
-        start = 0
-        while start < len(lines):
-            end = min(start + CHUNK_SIZE, len(lines))
-            chunks.append(lines[start:end])
-            start = end
+        # Replace multiple consecutive newlines with a single newline for better formatting
+        content = re.sub(r'\n+', '\n', content)
+        # We'll do a simple character-based chunking
+        chunks = [content[i:i + CHUNK_SIZE] for i in range(0, len(content), CHUNK_SIZE)]
 
         embeds = []
         for i, chunk_text in enumerate(chunks, start=1):
@@ -192,7 +208,7 @@ class MediaAnalyzer(commands.Cog):
             # We'll put the chunk in a code block for readability
             embed.add_field(
                 name="",  # no header => seamless
-                value=f"```{chunk_text}```",
+                value=f"```\n{chunk_text}\n```",
                 inline=False
             )
             embeds.append(embed)
@@ -208,10 +224,18 @@ class MediaAnalyzer(commands.Cog):
         """
         Build the final multi-page structure:
           Page 1 => all Exception embeds
-          Page 2 => all Enhanced Stacktrace
-          Page 3 => all Installed Modules
+          Page 2 => all Enhanced Stacktrace embeds
+          Page 3 => all Installed Modules embeds
         If a section is empty, skip it.
         If everything is empty, return a single page that says "No Crash Report Data Found."
+
+        Args:
+            exception_text (str): The extracted Exception section.
+            stacktrace_text (str): The extracted Enhanced Stacktrace section.
+            installed_modules_text (str): The extracted Installed Modules section.
+
+        Returns:
+            list[list[discord.Embed]]: A list of pages, each containing a list of embeds.
         """
         exc_embeds = self.build_embeds_for_section("Exception", exception_text)
         stack_embeds = self.build_embeds_for_section("Enhanced Stacktrace", stacktrace_text)
@@ -241,6 +265,9 @@ class MediaAnalyzer(commands.Cog):
         Command to analyze a crash report or an image link.
         - Crash report: multi-page single message, each page has 1+ embeds for a section
         - Image link: do OCR
+
+        Usage:
+            !analyze <url>
         """
         # If it's a crash report link
         if "report.butr.link" in url:
@@ -280,7 +307,7 @@ class MediaAnalyzer(commands.Cog):
                         )
                         embed.add_field(
                             name="Text Content",
-                            value=analysis["text"] or "No text found",
+                            value=f"```\n{analysis['text'] or 'No text found'}\n```",
                             inline=False,
                         )
                         embed.add_field(
