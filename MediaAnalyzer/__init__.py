@@ -1,4 +1,4 @@
-from .mediaanalyzer import MediaAnalyzer
+from .MediaAnalyzer import MediaAnalyzer
 
 def setup(bot):
     bot.add_cog(MediaAnalyzer(bot))
