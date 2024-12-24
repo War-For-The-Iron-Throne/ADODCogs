@@ -1,0 +1,7 @@
+{
+    "author" : ["Noxix"],
+    "name" : "MediaAnalyzer",
+    "short" : "Allows Alicent to read media.",
+    "description" : "Allows Alicent to read photos and gifs for information when speaking as an AI.",
+    "tags" : ["Images", "Gifs"]
+}
