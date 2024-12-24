@@ -8,6 +8,7 @@ from bs4 import BeautifulSoup
 from io import BytesIO
 import aiohttp
 import re
+import copy
 
 ###############################################################################
 # Helper Functions
@@ -54,98 +55,129 @@ def build_embeds_for_section(section_name: str, content: str) -> list[discord.Em
         if raw_line:
             lines.append(raw_line)
 
-    # We'll build one embed at a time. Start a fresh embed.
     embeds = []
     embed = discord.Embed(title=section_name, color=discord.Color.blue())
     field_count = 0
+    used_title = False  # We only want the first embed in this section to have the title
     current_field_lines = []
-    first_field_added = False  # We'll clear the title if we've already used it
 
-    def finalize_field():
-        """Helper to finalize the current_field_lines into the embed as a single field."""
-        nonlocal embed, field_count, current_field_lines
-        field_text = "\n".join(current_field_lines)
-        # wrap with code fences
-        field_text = f"```{field_text}```"
-        embed.add_field(name="\u200b", value=field_text, inline=False)
-        field_count += 1
-        current_field_lines.clear()
+    def finalize_field_to_embed(embed_obj: discord.Embed, field_lines: list[str]) -> bool:
+        """
+        Take the accumulated lines, form a code block, then add it as a field
+        to embed_obj. Returns True if the field was successfully added, False
+        if it couldn't fit (so we should start a new embed).
+        """
+        field_text = "\n".join(field_lines)
+        field_text = f"```{field_text}```"  # wrap with code fences
+
+        # We do a *test embed* to check size before adding permanently.
+        test_embed = copy.deepcopy(embed_obj)
+        test_embed.add_field(name="\u200b", value=field_text, inline=False)
+
+        if embed_size(test_embed) <= 6000:
+            # It's safe to add
+            embed_obj.add_field(name="\u200b", value=field_text, inline=False)
+            return True
+        return False
 
     for line in lines:
         # Check if adding `line` to current_field_lines would exceed 1000
         tentative_field_text = "\n".join(current_field_lines + [line])
         if len(tentative_field_text) > 1000:
-            # finalize the current field, start a new one
+            # We must finalize the current field
             if current_field_lines:
-                finalize_field()
+                # Attempt to add to embed
+                added_ok = finalize_field_to_embed(embed, current_field_lines)
+                if not added_ok:
+                    # If even the existing lines can't fit, that means the embed is already full
+                    # We push the embed to the list only if it has fields, or if it's the first
+                    if field_count > 0 or (embed.title and embed.description):
+                        embeds.append(embed)
+                    # start a new embed
+                    embed = discord.Embed(
+                        color=discord.Color.blue()
+                    )
+                    if not used_title:
+                        embed.title = section_name
+                        used_title = True
+                    finalize_field_to_embed(embed, current_field_lines)
+                    field_count = len(embed.fields)
 
-            # If we already have 10 fields, or adding the new field to this embed
-            # would exceed 6000, we start a new embed
-            if field_count >= 10 or embed_size(embed) > 6000:
+                else:
+                    field_count += 1
+
+            # Now we start a new field with the new line
+            current_field_lines = [line]
+
+            # If we already have 10 fields in this embed, or the embed is at limit, we start fresh
+            if field_count >= 10:
                 embeds.append(embed)
-                # Start a new embed, possibly without a title if it's not the first embed
                 embed = discord.Embed(color=discord.Color.blue())
-                field_count = 0
-
-                # Only the first embed in the section has the section_name as a title
-                if not first_field_added:
+                if not used_title:
                     embed.title = section_name
-                    first_field_added = True
-
-            current_field_lines.append(line)
+                    used_title = True
+                field_count = 0
             continue
 
-        # If it doesn't exceed 1000, we just accumulate the line
+        # If we won't exceed 1000 chars, we just accumulate the line
         current_field_lines.append(line)
+        # After adding the line, check if we might blow up the embed by finalizing it
+        # only if we need to finalize right now... otherwise we keep going
 
-        # After adding the line, check if we already have 10 fields or if adding
-        # another line might blow up the embed size. Let's do it carefully:
+        # If we already have 10 fields, we can't add more fields to this embed
+        # so we finalize the current lines right now
         if field_count >= 10:
-            # This means we can't add any more fields to this embed
+            # finalize whatever is in current_field_lines
             if current_field_lines:
-                finalize_field()
+                added_ok = finalize_field_to_embed(embed, current_field_lines)
+                if not added_ok:
+                    # if it didn't fit, new embed
+                    if field_count > 0 or (embed.title and embed.description):
+                        embeds.append(embed)
+                    embed = discord.Embed(color=discord.Color.blue())
+                    if not used_title:
+                        embed.title = section_name
+                        used_title = True
+                    finalize_field_to_embed(embed, current_field_lines)
+                field_count = len(embed.fields)
+                current_field_lines = []
+            # push this embed and start a new one
             embeds.append(embed)
-            # new embed
             embed = discord.Embed(color=discord.Color.blue())
-            field_count = 0
-            if not first_field_added:
+            if not used_title:
                 embed.title = section_name
-                first_field_added = True
-            continue
+                used_title = True
+            field_count = 0
 
     # After the loop, if there's anything left in current_field_lines, finalize it
     if current_field_lines:
-        finalize_field()
-
-    # We might end with an embed that has no fields, so check embed_size > (base embed)
-    # but typically we'll at least have something. We'll only append if it actually has fields.
-    if field_count > 0:
-        # If for any reason it exceeds 6000 after adding the final field, we make a new embed
-        if embed_size(embed) > 6000:
-            # Move that big field to a new embed
-            last_field = embed.fields[-1]
-            embed.remove_field(len(embed.fields) - 1)
-            # If the embed is still non-empty, store it
-            if len(embed.fields) > 0:
+        added_ok = finalize_field_to_embed(embed, current_field_lines)
+        if not added_ok:
+            # If we can't fit it in the current embed, push the current embed if it has something
+            if field_count > 0 or (embed.title and embed.description):
                 embeds.append(embed)
-
-            # Start a fresh embed
             embed = discord.Embed(color=discord.Color.blue())
-            if not first_field_added:
+            if not used_title:
                 embed.title = section_name
-            embed.add_field(name=last_field.name, value=last_field.value, inline=False)
-            # final size check
-            if embed_size(embed) <= 6000:
-                embeds.append(embed)
-        else:
+                used_title = True
+            finalize_field_to_embed(embed, current_field_lines)
+            field_count = len(embed.fields)
+
+    # If the embed has fields (or a title), add it
+    if len(embed.fields) > 0 or (embed.title and embed.description):
+        if embed_size(embed) <= 6000:
             embeds.append(embed)
+        else:
+            # This scenario would be extremely rare (e.g. one field is huge)
+            # but we chunked the field down, so it should rarely happen.
+            pass
 
     return embeds
 
 def chunk_embeds(embeds: list[discord.Embed], size=10) -> list[list[discord.Embed]]:
     """
     Discord only allows up to 10 embeds in a single message.
-    We split a list of Embeds into sub-lists of up to 'size'.
+    We split a list of Embeds into sub-lists of up to 'size' each.
     Each sub-list is one "page" in the paginator.
     """
     pages = []
@@ -402,6 +434,7 @@ class MediaAnalyzer(commands.Cog):
         if message.author.bot:
             return
 
+        # Detect URLs
         urls = [word for word in message.content.split() if word.startswith("http")]
         for url in urls:
             if "report.butr.link" in url.lower():
