@@ -65,63 +65,63 @@ class MediaAnalyzer(commands.Cog):
             await self.session.close()
         print("MediaAnalyzer cog has been unloaded and resources cleaned up.")
 
-    async def fetch_webpage(self, url: str) -> dict:
-        """
-        Fetch the content of a crash-report webpage and extract:
-          - Exception
-          - Enhanced Stacktrace
-          - Installed Modules
-        using regex that captures everything up until the next section header or the end of the file.
-        """
-        try:
-            async with self.session.get(url) as response:
-                if response.status != 200:
-                    return {"error": f"Failed to fetch webpage. HTTP Status: {response.status}"}
+async def fetch_webpage(self, url: str) -> dict:
+    """
+    Fetch the content of a crash-report webpage and extract:
+      - Exception
+      - Enhanced Stacktrace
+      - Installed Modules
+    using regex that captures everything up until the next section header or the end of the file.
+    """
+    try:
+        async with self.session.get(url) as response:
+            if response.status != 200:
+                return {"error": f"Failed to fetch webpage. HTTP Status: {response.status}"}
 
-                html_content = await response.text()
-                full_text = BeautifulSoup(html_content, "html.parser").get_text()
+            html_content = await response.text()
+            full_text = BeautifulSoup(html_content, "html.parser").get_text()
 
-                # Update regex patterns to match '-' instead of '+'
-                # Also make the section header recognition more flexible
-                # 1) Exception: capture from '- Exception' up to the next line that starts with '- ' or '+ ' or EOF
-                exception_regex = re.compile(
-                    r"[-+] Exception\s+([\s\S]+?)(?=\n[-+]\s|\Z)"
-                )
-                exception_match = exception_regex.search(full_text)
-                exception_text = exception_match.group(1).strip() if exception_match else ""
+            # Update regex patterns to match '-' instead of '+'
+            # Also make the section header recognition more flexible
+            # 1) Exception: capture from '- Exception' up to the next line that starts with '- ' or '+ ' or EOF
+            exception_regex = re.compile(
+                r"[-+] Exception\s+([\s\S]+?)(?=\n[-+]\s|\Z)"
+            )
+            exception_match = exception_regex.search(full_text)
+            exception_text = exception_match.group(1).strip() if exception_match else ""
 
-                # 2) Enhanced Stacktrace
-                stacktrace_regex = re.compile(
-                    r"[-+] Enhanced Stacktrace\s+([\s\S]+?)(?=\n[-+]\s|\Z)"
-                )
-                stacktrace_match = stacktrace_regex.search(full_text)
-                stacktrace_text = stacktrace_match.group(1).strip() if stacktrace_match else ""
+            # 2) Enhanced Stacktrace
+            stacktrace_regex = re.compile(
+                r"[-+] Enhanced Stacktrace\s+([\s\S]+?)(?=\n[-+]\s|\Z)"
+            )
+            stacktrace_match = stacktrace_regex.search(full_text)
+            stacktrace_text = stacktrace_match.group(1).strip() if stacktrace_match else ""
 
-                # 3) Installed Modules: capture from '- Installed Modules' up to next '- ' or '+ ' or EOF
-                modules_regex = re.compile(
-                    r"[-+] Installed Modules\s+([\s\S]+?)(?=\n[-+]\s|\Z)"
-                )
-                modules_match = modules_regex.search(full_text)
-                installed_modules_text = ""
-                if modules_match:
-                    modules_block = modules_match.group(1)
-                    # More robust findall to get ALL lines that start with '+' or '-'
-                    # e.g. '- Harmony (Bannerlord.Harmony, v2.3.3.207)'
-                    # We'll capture everything after '+ ' or '- ' up to '(' or end-of-line
-                    mods = re.findall(r"^[+-]\s+(.*?)(?:\(|$)", modules_block, re.MULTILINE)
-                    # Clean them up
-                    mod_names = [m.strip() for m in mods if m.strip()]
-                    if mod_names:
-                        installed_modules_text = "\n".join(mod_names)
+            # 3) Installed Modules: Updated regex to capture all module lines
+            modules_regex = re.compile(
+                r"[-+] Installed Modules\s+((?:[+-]\s+.*(?:\n|$))+)",
+                re.MULTILINE
+            )
+            modules_match = modules_regex.search(full_text)
+            installed_modules_text = ""
+            if modules_match:
+                modules_block = modules_match.group(1)
+                # Extract module names before '(' or end of line
+                mods = re.findall(r"^[+-]\s+(.*?)(?:\(|$)", modules_block, re.MULTILINE)
+                # Clean them up
+                mod_names = [m.strip() for m in mods if m.strip()]
+                if mod_names:
+                    installed_modules_text = "\n".join(mod_names)
 
-                return {
-                    "exception": exception_text,
-                    "enhanced_stacktrace": stacktrace_text,
-                    "installed_modules": installed_modules_text
-                }
+            return {
+                "exception": exception_text,
+                "enhanced_stacktrace": stacktrace_text,
+                "installed_modules": installed_modules_text
+            }
 
-        except Exception as e:
-            return {"error": f"Error fetching webpage: {e}"}
+    except Exception as e:
+        return {"error": f"Error fetching webpage: {e}"}
+
 
     async def analyze_media(self, image_data: bytes) -> dict:
         """Analyze image bytes with pytesseract."""
