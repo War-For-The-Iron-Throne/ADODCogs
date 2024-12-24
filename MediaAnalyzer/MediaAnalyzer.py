@@ -8,22 +8,44 @@ from io import BytesIO
 import aiohttp
 import re
 
+def extract_section(full_text: str, section_name: str, other_sections: list[str]) -> str:
+    """
+    Extract everything from `+ {section_name}` until we hit `+ {some other section}`
+    or the end of the file, ignoring lines like '+ IL:'.
+    Using a regex that says:
+      (?s)       => dot matches newlines
+      \+ {section_name}\s+ => matches the line "+ SomeSection"
+      (.*?)      => capture everything non-greedily
+      (?=        => lookahead for
+         \+ (?:{other_sections joined by |})
+         | \Z
+      )
+    If not found, return an empty string.
+    """
+    # If no "other sections" were provided, we might just stop at the end (\Z)
+    if not other_sections:
+        other_sections = []
+    pattern = rf"(?s)\+ {re.escape(section_name)}\s+(.*?)(?=\+ (?:{'|'.join(other_sections)})|\Z)"
+    match = re.search(pattern, full_text)
+    return match.group(1).strip() if match else ""
+
 class PaginatedEmbeds(View):
     """
-    Single View-based paginator that cycles through pages,
-    where each 'page' can have multiple embeds (sent as 'embeds=[...]').
+    A single View-based paginator that cycles through 'pages',
+    where each page is a list of embed objects (so we can send multiple embeds in one message).
     """
     def __init__(self, pages: list[list[discord.Embed]], invoker_id: int):
         super().__init__(timeout=300)  # 5-minute timeout
-        self.pages = pages  # e.g. [ [embedA, embedB], [embedC], [embedD, embedE], ... ]
+        self.pages = pages
         self.index = 0
         self.invoker_id = invoker_id
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        # Only allow the original user to use the paginator.
+        # Only the original user can press the buttons
         return interaction.user.id == self.invoker_id
 
     async def update_message(self, interaction: discord.Interaction):
+        # Edits the existing message to show the new set of embeds
         await interaction.response.edit_message(
             embeds=self.pages[self.index],
             view=self
@@ -49,7 +71,6 @@ class PaginatedEmbeds(View):
                 "You're already on the last page!", ephemeral=True
             )
 
-
 class MediaAnalyzer(commands.Cog):
     """Analyze images, crash reports, and webpages for AI Assistant functionality."""
 
@@ -68,10 +89,10 @@ class MediaAnalyzer(commands.Cog):
     async def fetch_webpage(self, url: str) -> dict:
         """
         Fetch the content of a crash-report webpage and extract:
-          - Exception
-          - Enhanced Stacktrace
-          - Installed Modules
-        using regex that captures everything up until the next "+ <Section>" or the end of file.
+         - Exception
+         - Enhanced Stacktrace
+         - Installed Modules
+        in a way that doesn't break on '+ IL:' lines or short-circuit after 1 mod.
         """
         try:
             async with self.session.get(url) as response:
@@ -81,43 +102,50 @@ class MediaAnalyzer(commands.Cog):
                 html_content = await response.text()
                 full_text = BeautifulSoup(html_content, "html.parser").get_text()
 
-                # 1) Exception: capture from '+ Exception' up to the next line that starts with '+ ' or EOF
-                #    We use a lazy pattern so we don't run over into other sections.
-                exception_regex = re.compile(
-                    r"\+ Exception\s+([\s\S]+?)(?=\n\+\s|\Z)"
-                )
-                exception_match = exception_regex.search(full_text)
-                exception_text = exception_match.group(1).strip() if exception_match else ""
+                # We'll define the other sections that might appear:
+                sections = ["Exception", "Enhanced Stacktrace", "Installed Modules"]
+                # We'll individually extract each one by name
 
-                # 2) Enhanced Stacktrace
-                stacktrace_regex = re.compile(
-                    r"\+ Enhanced Stacktrace\s+([\s\S]+?)(?=\n\+\s|\Z)"
+                exception_text = extract_section(
+                    full_text,
+                    "Exception",
+                    other_sections=["Enhanced Stacktrace", "Installed Modules"]
                 )
-                stacktrace_match = stacktrace_regex.search(full_text)
-                stacktrace_text = stacktrace_match.group(1).strip() if stacktrace_match else ""
+                stacktrace_text = extract_section(
+                    full_text,
+                    "Enhanced Stacktrace",
+                    other_sections=["Exception", "Installed Modules"]
+                )
+                modules_text = extract_section(
+                    full_text,
+                    "Installed Modules",
+                    other_sections=["Exception", "Enhanced Stacktrace"]
+                )
 
-                # 3) Installed Modules: We'll capture from '+ Installed Modules' up to next '+ ' or EOF
-                #    Then parse each line that starts with '+ ' to extract the mod names
-                modules_regex = re.compile(
-                    r"\+ Installed Modules\s+([\s\S]+?)(?=\n\+\s|\Z)"
-                )
-                modules_match = modules_regex.search(full_text)
-                installed_modules_text = ""
-                if modules_match:
-                    modules_block = modules_match.group(1)
-                    # More robust findall to get ALL lines that start with +
-                    # e.g. '+ Harmony (Bannerlord.Harmony, v2.3.3.207)'
-                    # We'll capture everything after '+ ' up to '(' or end-of-line
-                    mods = re.findall(r"^\+\s+(.*?)(?:\(|$)", modules_block, re.MULTILINE)
-                    # Clean them up
-                    mod_names = [m.strip() for m in mods if m.strip()]
-                    if mod_names:
-                        installed_modules_text = "\n".join(mod_names)
+                # Now parse out the mod lines from modules_text
+                # We might have lines like:
+                # + Harmony (Bannerlord.Harmony, v2.3.3.207)
+                # + ButterLib (Bannerlord.ButterLib, v2.9.18.0)
+                # ...
+                # We want to see them all, not just the first.
+                mods_found = []
+                for line in modules_text.splitlines():
+                    line = line.strip()
+                    # e.g. "+ Harmony (Bannerlord.Harmony, v2.3.3.207)"
+                    if line.startswith("+ "):
+                        # Let's capture everything after '+ ' up until '(' or end
+                        m = re.match(r"\+\s+(.*?)(?:\(|$)", line)
+                        if m:
+                            name = m.group(1).strip()
+                            if name:
+                                mods_found.append(name)
+                # Convert them back to a single string for display
+                installed_modules = "\n".join(mods_found)
 
                 return {
                     "exception": exception_text,
                     "enhanced_stacktrace": stacktrace_text,
-                    "installed_modules": installed_modules_text
+                    "installed_modules": installed_modules
                 }
 
         except Exception as e:
@@ -136,48 +164,35 @@ class MediaAnalyzer(commands.Cog):
         except Exception as e:
             return {"error": f"Failed to analyze image: {e}"}
 
-    def build_embeds_for_section(self, section_name: str, content: str) -> list[discord.Embed]:
+    def build_embeds_for_section(self, section_title: str, content: str) -> list[discord.Embed]:
         """
-        Break up a section's content into multiple embeds, if needed.
-        - The first chunk has a title; subsequent chunks do not, to keep it "seamless."
-        - Each chunk is placed in an embed field with code blocks.
-        - Returns a list of embed objects that belong to this section.
-
-        Example:
-          If Exception is huge, we might get [embed1(title=Exception, chunk1), embed2(title="", chunk2), ...].
+        Break up the content for one section into multiple embeds (if necessary).
+        - The first chunk has a title; subsequent chunks are blank so it reads seamlessly.
         """
         content = content.strip()
         if not content:
             return []
 
-        CHUNK_SIZE = 1024 - 10  # 10 chars overhead for code block formatting, newlines, etc.
+        CHUNK_SIZE = 1024 - 10  # leave space for code blocks, newlines
+        lines = content
+        # We'll do a simple character-based chunking (since some lines can be quite long).
         chunks = []
-        start_idx = 0
-        while start_idx < len(content):
-            end_idx = min(start_idx + CHUNK_SIZE, len(content))
-            chunk = content[start_idx:end_idx]
-            chunks.append(chunk)
-            start_idx += CHUNK_SIZE
+        start = 0
+        while start < len(lines):
+            end = min(start + CHUNK_SIZE, len(lines))
+            chunks.append(lines[start:end])
+            start = end
 
         embeds = []
-        total_chunks = len(chunks)
-
         for i, chunk_text in enumerate(chunks, start=1):
-            # For the first chunk of this section, show the section_name in the embed title
-            # For subsequent chunks, omit the title (or set it to "", if you prefer).
-            if i == 1:
-                embed_title = section_name
-            else:
-                embed_title = ""  # or None, but empty string = no visible title
+            # Only the first chunk has the section title
+            embed_title = section_title if i == 1 else ""
+            embed = discord.Embed(title=embed_title, color=discord.Color.blue())
 
-            embed = discord.Embed(
-                title=embed_title,
-                color=discord.Color.blue()
-            )
-            # Add the code-block chunk
+            # We'll put the chunk in a code block for readability
             embed.add_field(
-                name="",  # no field name so it's "seamless"
-                value=f"```cs {chunk_text}```",
+                name="",  # no header => seamless
+                value=f"```{chunk_text}```",
                 inline=False
             )
             embeds.append(embed)
@@ -191,13 +206,12 @@ class MediaAnalyzer(commands.Cog):
         installed_modules_text: str
     ) -> list[list[discord.Embed]]:
         """
-        Build a list of PAGES, each page is a list of embed objects.
-        We'll do:
-          Page 1 => all 'Exception' embeds
-          Page 2 => all 'Enhanced Stacktrace' embeds
-          Page 3 => all 'Installed Modules' embeds
-        If a section is empty, skip it entirely.
-        If everything is empty, return a single page with "No data" embed.
+        Build the final multi-page structure:
+          Page 1 => all Exception embeds
+          Page 2 => all Enhanced Stacktrace
+          Page 3 => all Installed Modules
+        If a section is empty, skip it.
+        If everything is empty, return a single page that says "No Crash Report Data Found."
         """
         exc_embeds = self.build_embeds_for_section("Exception", exception_text)
         stack_embeds = self.build_embeds_for_section("Enhanced Stacktrace", stacktrace_text)
@@ -211,14 +225,13 @@ class MediaAnalyzer(commands.Cog):
         if mods_embeds:
             pages.append(mods_embeds)
 
-        # If no data found at all
         if not pages:
-            empty_embed = discord.Embed(
+            no_data_embed = discord.Embed(
                 title="No Crash Report Data Found",
                 description="Could not find Exception, Enhanced Stacktrace, or Installed Modules.",
                 color=discord.Color.red()
             )
-            return [[empty_embed]]
+            return [[no_data_embed]]
 
         return pages
 
@@ -226,27 +239,26 @@ class MediaAnalyzer(commands.Cog):
     async def analyze_command(self, ctx, url: str):
         """
         Command to analyze a crash report or an image link.
-        Presents all sections in one message, multiple pages, each page can have multiple embeds.
+        - Crash report: multi-page single message, each page has 1+ embeds for a section
+        - Image link: do OCR
         """
-        # If it's a crash report
+        # If it's a crash report link
         if "report.butr.link" in url:
             data = await self.fetch_webpage(url)
             if "error" in data:
                 return await ctx.send(data["error"])
 
+            # Unpack
             exception_text = data.get("exception", "")
             stacktrace_text = data.get("enhanced_stacktrace", "")
             mods_text = data.get("installed_modules", "")
 
             pages = self.build_pages(exception_text, stacktrace_text, mods_text)
-            # Each element in 'pages' is a list of embed objects
 
             if len(pages) == 1:
-                # Only one "page," so no need for next/prev
-                # But that page might have multiple embeds, so we can do:
+                # Only one "page" => might have multiple embeds
                 return await ctx.send(embeds=pages[0])
 
-            # Otherwise, use the paginator
             view = PaginatedEmbeds(pages, ctx.author.id)
             await ctx.send(embeds=pages[0], view=view)
 
@@ -260,29 +272,29 @@ class MediaAnalyzer(commands.Cog):
                     analysis = await self.analyze_media(image_data)
                     if "error" in analysis:
                         return await ctx.send(f"Error: {analysis['error']}")
-
-                    embed = discord.Embed(
-                        title="Media Analysis",
-                        description=f"Content extracted from the media at {url}",
-                        color=discord.Color.green(),
-                    )
-                    embed.add_field(
-                        name="Text Content",
-                        value=analysis["text"] or "No text found",
-                        inline=False,
-                    )
-                    embed.add_field(
-                        name="Resolution",
-                        value=f"{analysis['width']}x{analysis['height']}",
-                        inline=False,
-                    )
-                    await ctx.send(embed=embed)
+                    else:
+                        embed = discord.Embed(
+                            title="Media Analysis",
+                            description=f"Content extracted from the media at {url}",
+                            color=discord.Color.green(),
+                        )
+                        embed.add_field(
+                            name="Text Content",
+                            value=analysis["text"] or "No text found",
+                            inline=False,
+                        )
+                        embed.add_field(
+                            name="Resolution",
+                            value=f"{analysis['width']}x{analysis['height']}",
+                            inline=False,
+                        )
+                        await ctx.send(embed=embed)
             except Exception as e:
                 await ctx.send(f"Error analyzing the media: {e}")
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        """Auto-detect crash report links in messages."""
+        """Auto-detect crash-report links in normal messages."""
         if message.author.bot:
             return
 
@@ -300,7 +312,6 @@ class MediaAnalyzer(commands.Cog):
 
                 pages = self.build_pages(exception_text, stacktrace_text, mods_text)
                 if len(pages) == 1:
-                    # Single page => possibly multiple embeds
                     await message.reply(embeds=pages[0])
                 else:
                     view = PaginatedEmbeds(pages, message.author.id)
@@ -308,8 +319,8 @@ class MediaAnalyzer(commands.Cog):
 
                 return
 
-        # If no crash-report link, you could still handle attachments here, if desired
-        # (omitted for brevity)
+        # If no crash-report link, you could still handle attachments here if needed...
+
 
 async def setup(bot):
     cog = MediaAnalyzer(bot)
