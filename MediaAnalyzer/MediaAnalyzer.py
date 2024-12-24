@@ -1,12 +1,11 @@
-import discord
-from discord.ext import commands
+from redbot.core import commands
 from PIL import Image
 import pytesseract
 from io import BytesIO
 import aiohttp
 
 
-class MediaAnalyzer(commands.Cog):
+class MediaAnalyzer(commands.Cog):  # Ensure it inherits from commands.Cog
     """Analyze images and GIFs for AI Assistant functionality."""
 
     def __init__(self, bot):
@@ -19,7 +18,7 @@ class MediaAnalyzer(commands.Cog):
 
     async def cog_unload(self) -> None:
         """Executed when the cog is unloaded."""
-        if self.session is not None:
+        if self.session:
             await self.session.close()
         print("MediaAnalyzer cog has been unloaded and resources cleaned up.")
 
@@ -66,31 +65,7 @@ class MediaAnalyzer(commands.Cog):
         embed.add_field(name="Resolution", value=f"{analysis['width']}x{analysis['height']}", inline=False)
         await ctx.send(embed=embed)
 
-    @commands.Cog.listener()
-    async def on_assistant_cog_add(self, cog: commands.Cog):
-        """Register the analyze_media function with Assistant."""
-        schema = {
-            "name": "analyze_media",
-            "description": "Analyze an image or GIF URL for content.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "url": {
-                        "type": "string",
-                        "description": "The URL of the media to analyze.",
-                    }
-                },
-                "required": ["url"],
-            },
-        }
-        await cog.register_function(cog_name="MediaAnalyzer", schema=schema)
-
 
 async def setup(bot):
     cog = MediaAnalyzer(bot)
-    try:
-        await bot.add_cog(cog)
-    except Exception as e:
-        if cog.session:
-            await cog.session.close()
-        raise e
+    await bot.add_cog(cog)
