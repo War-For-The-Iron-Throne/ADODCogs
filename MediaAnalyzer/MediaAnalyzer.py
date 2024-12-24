@@ -13,6 +13,135 @@ import re
 # Helper Functions
 ###############################################################################
 
+def embed_size(embed: discord.Embed) -> int:
+    """
+    Convert an embed to a dict, then JSON-stringify it to measure
+    its total size. We'll use this to ensure it doesn't exceed 6000.
+    """
+    as_dict = embed.to_dict()
+    return len(json.dumps(as_dict))
+
+def build_embeds_for_section(section_name: str, content: str) -> list[discord.Embed]:
+    """
+    Break 'content' into multiple embeds (each with up to 10 fields, each field <= 1000 chars).
+    We also ensure that each embed doesn't exceed 6000 total JSON-serialized characters.
+
+    Steps:
+      1. Sanitize triple backticks (replace them).
+      2. Wrap the text by splitting into lines of ~80 chars.
+      3. Accumulate lines into a 'current_field' until:
+         - adding another line would exceed 1000 chars, or
+         - we have 10 fields in the embed, or
+         - adding the field would exceed the embed's 6000-char limit.
+      4. Move to the next embed as needed.
+    """
+    content = content.strip()
+    if not content:
+        return []
+
+    # Replace triple backticks so we don't nest code blocks
+    content = content.replace("```", "'''")
+
+    # We'll break content into lines no longer than ~80 chars
+    # so we can easily accumulate them into fields.
+    lines = []
+    for raw_line in content.splitlines():
+        raw_line = raw_line.strip("\r")
+        # further split if the line is very long
+        while len(raw_line) > 80:
+            lines.append(raw_line[:80])
+            raw_line = raw_line[80:]
+        if raw_line:
+            lines.append(raw_line)
+
+    # We'll build one embed at a time. Start a fresh embed.
+    embeds = []
+    embed = discord.Embed(title=section_name, color=discord.Color.blue())
+    field_count = 0
+    current_field_lines = []
+    first_field_added = False  # We'll clear the title if we've already used it
+
+    def finalize_field():
+        """Helper to finalize the current_field_lines into the embed as a single field."""
+        nonlocal embed, field_count, current_field_lines
+        field_text = "\n".join(current_field_lines)
+        # wrap with code fences
+        field_text = f"```{field_text}```"
+        embed.add_field(name="\u200b", value=field_text, inline=False)
+        field_count += 1
+        current_field_lines.clear()
+
+    for line in lines:
+        # Check if adding `line` to current_field_lines would exceed 1000
+        tentative_field_text = "\n".join(current_field_lines + [line])
+        if len(tentative_field_text) > 1000:
+            # finalize the current field, start a new one
+            if current_field_lines:
+                finalize_field()
+
+            # If we already have 10 fields, or adding the new field to this embed
+            # would exceed 6000, we start a new embed
+            if field_count >= 10 or embed_size(embed) > 6000:
+                embeds.append(embed)
+                # Start a new embed, possibly without a title if it's not the first embed
+                embed = discord.Embed(color=discord.Color.blue())
+                field_count = 0
+
+                # Only the first embed in the section has the section_name as a title
+                if not first_field_added:
+                    embed.title = section_name
+                    first_field_added = True
+
+            current_field_lines.append(line)
+            continue
+
+        # If it doesn't exceed 1000, we just accumulate the line
+        current_field_lines.append(line)
+
+        # After adding the line, check if we already have 10 fields or if adding
+        # another line might blow up the embed size. Let's do it carefully:
+        if field_count >= 10:
+            # This means we can't add any more fields to this embed
+            if current_field_lines:
+                finalize_field()
+            embeds.append(embed)
+            # new embed
+            embed = discord.Embed(color=discord.Color.blue())
+            field_count = 0
+            if not first_field_added:
+                embed.title = section_name
+                first_field_added = True
+            continue
+
+    # After the loop, if there's anything left in current_field_lines, finalize it
+    if current_field_lines:
+        finalize_field()
+
+    # We might end with an embed that has no fields, so check embed_size > (base embed)
+    # but typically we'll at least have something. We'll only append if it actually has fields.
+    if field_count > 0:
+        # If for any reason it exceeds 6000 after adding the final field, we make a new embed
+        if embed_size(embed) > 6000:
+            # Move that big field to a new embed
+            last_field = embed.fields[-1]
+            embed.remove_field(len(embed.fields) - 1)
+            # If the embed is still non-empty, store it
+            if len(embed.fields) > 0:
+                embeds.append(embed)
+
+            # Start a fresh embed
+            embed = discord.Embed(color=discord.Color.blue())
+            if not first_field_added:
+                embed.title = section_name
+            embed.add_field(name=last_field.name, value=last_field.value, inline=False)
+            # final size check
+            if embed_size(embed) <= 6000:
+                embeds.append(embed)
+        else:
+            embeds.append(embed)
+
+    return embeds
+
 def chunk_embeds(embeds: list[discord.Embed], size=10) -> list[list[discord.Embed]]:
     """
     Discord only allows up to 10 embeds in a single message.
@@ -23,74 +152,6 @@ def chunk_embeds(embeds: list[discord.Embed], size=10) -> list[list[discord.Embe
     for i in range(0, len(embeds), size):
         pages.append(embeds[i : i + size])
     return pages
-
-def ensure_under_6000(embed: discord.Embed) -> bool:
-    """
-    Check if a single embed's total size (title + description + fields + etc.)
-    might exceed Discord's 6000-character limit.
-
-    We'll convert the embed to a dict and measure its JSON length
-    as a rough proxy. This is slightly more strict than needed, but safe.
-    """
-    try:
-        embed_dict = embed.to_dict()
-        json_str = json.dumps(embed_dict)
-        return len(json_str) <= 6000
-    except Exception:
-        # If something goes wrong converting, err on the side of "unsafe"
-        return False
-
-def build_safe_embeds(section_name: str, content: str) -> list[discord.Embed]:
-    """
-    Safely create multiple embeds from a single large text block (content).
-    Each embed will contain a *single field*, ensuring:
-      - Field value <= 1024
-      - Total embed size <= 6000
-      - We also sanitize triple-backticks to avoid weird expansions
-    """
-    content = content.strip()
-    if not content:
-        return []
-
-    # Replace triple backticks with something safer
-    # so we don't cause embedded code blocks in code blocks.
-    safe_text = content.replace("```", "'''")
-
-    # We'll start with a chunk size that comfortably fits in a single field.
-    # If your text is extremely large, we'll keep chunking until < 1024.
-    chunk_size = 1000
-
-    # Break the text into 1000-character pieces (just below the 1024 field limit).
-    # If this STILL ends up making an embed that is too big (rare), we'll reduce further.
-    chunks = [safe_text[i : i + chunk_size] for i in range(0, len(safe_text), chunk_size)]
-
-    embeds = []
-    for idx, chunk_text in enumerate(chunks, start=1):
-        # For the first chunk, embed title = section_name, otherwise blank
-        embed_title = section_name if idx == 1 else ""
-        embed = discord.Embed(title=embed_title, color=discord.Color.blue())
-
-        # We'll wrap the chunk in triple backticks
-        field_value = f"```{chunk_text}```"
-
-        embed.add_field(name="\u200b", value=field_value, inline=False)
-
-        # If for some reason it's still too large, we keep chopping it down
-        # until it fits under the 6000 limit (very rare scenario).
-        while not ensure_under_6000(embed) and len(chunk_text) > 50:
-            # Reduce chunk_text further
-            chunk_text = chunk_text[: len(chunk_text) // 2]
-            embed.clear_fields()  # Remove existing fields
-            field_value = f"```{chunk_text}```"
-            embed.add_field(name="\u200b", value=field_value, inline=False)
-
-        # If we STILL can't fit, we give up on this chunk and skip it
-        if not ensure_under_6000(embed):
-            continue
-
-        embeds.append(embed)
-
-    return embeds
 
 ###############################################################################
 # Paginator
@@ -256,19 +317,18 @@ class MediaAnalyzer(commands.Cog):
         """
         Build a list of 'pages.' Each page = up to 10 Embeds.
 
-        1) Build embed-lists for each section (Exception, Enhanced Stacktrace, Modules)
-           using build_safe_embeds(...).
-        2) Then chunk them into groups of 10 for pagination.
-        3) Return the "pages" - a list of lists of embeds.
+        For each section (Exception, Enhanced Stacktrace, Modules),
+        we create multiple embeds via build_embeds_for_section(...).
+        Then we combine all those embeds into a single list, and chunk them
+        in groups of 10 to form the final "pages" for pagination.
         """
-        exc_embeds = build_safe_embeds("Exception", exception_text)
-        stack_embeds = build_safe_embeds("Enhanced Stacktrace", stacktrace_text)
-        mods_embeds = build_safe_embeds("Installed Modules", installed_modules_text)
+        exc_embeds = build_embeds_for_section("Exception", exception_text)
+        stack_embeds = build_embeds_for_section("Enhanced Stacktrace", stacktrace_text)
+        mods_embeds = build_embeds_for_section("Installed Modules", installed_modules_text)
 
         all_embeds = exc_embeds + stack_embeds + mods_embeds
-
-        # If no sections had anything, show a single 'No Data' page
         if not all_embeds:
+            # If no data was found at all, return a single "No Data" page
             empty_embed = discord.Embed(
                 title="No Crash Report Data Found",
                 description="Could not find Exception, Enhanced Stacktrace, or Installed Modules.",
@@ -276,7 +336,6 @@ class MediaAnalyzer(commands.Cog):
             )
             return [[empty_embed]]
 
-        # Now we chunk the entire list of built embeds in groups of 10
         pages = chunk_embeds(all_embeds, 10)
         return pages
 
