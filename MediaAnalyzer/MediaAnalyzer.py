@@ -65,63 +65,84 @@ class MediaAnalyzer(commands.Cog):
             await self.session.close()
         print("MediaAnalyzer cog has been unloaded and resources cleaned up.")
 
-async def fetch_webpage(self, url: str) -> dict:
-    """
-    Fetch the content of a crash-report webpage and extract:
-      - Exception
-      - Enhanced Stacktrace
-      - Installed Modules
-    using regex that captures everything up until the next section header or the end of the file.
-    """
-    try:
-        async with self.session.get(url) as response:
-            if response.status != 200:
-                return {"error": f"Failed to fetch webpage. HTTP Status: {response.status}"}
+    async def fetch_webpage(self, url: str) -> dict:
+        """
+        Fetch the content of a crash-report webpage and extract:
+          - Exception
+          - Enhanced Stacktrace
+          - Installed Modules
 
-            html_content = await response.text()
-            full_text = BeautifulSoup(html_content, "html.parser").get_text()
+        We'll use more specific regex lookaheads so we don't stop capturing
+        just because we see '+ IL:' or '+ C#:'. Instead, we only stop when
+        we see the next recognized section (Exception, Enhanced Stacktrace,
+        Installed Modules, etc.) or the end of the file.
+        """
+        try:
+            async with self.session.get(url) as response:
+                if response.status != 200:
+                    return {"error": f"Failed to fetch webpage. HTTP Status: {response.status}"}
 
-            # Update regex patterns to match '-' instead of '+'
-            # Also make the section header recognition more flexible
-            # 1) Exception: capture from '- Exception' up to the next line that starts with '- ' or '+ ' or EOF
-            exception_regex = re.compile(
-                r"[-+] Exception\s+([\s\S]+?)(?=\n[-+]\s|\Z)"
-            )
-            exception_match = exception_regex.search(full_text)
-            exception_text = exception_match.group(1).strip() if exception_match else ""
+                html_content = await response.text()
+                full_text = BeautifulSoup(html_content, "html.parser").get_text()
 
-            # 2) Enhanced Stacktrace
-            stacktrace_regex = re.compile(
-                r"[-+] Enhanced Stacktrace\s+([\s\S]+?)(?=\n[-+]\s|\Z)"
-            )
-            stacktrace_match = stacktrace_regex.search(full_text)
-            stacktrace_text = stacktrace_match.group(1).strip() if stacktrace_match else ""
+                # We'll define regex patterns that specifically stop at the
+                # next recognized heading or the end of file:
+                # (Exception / Enhanced Stacktrace / Installed Modules)
+                # You can expand these if the site has more sections you want to parse.
 
-            # 3) Installed Modules: Updated regex to capture all module lines
-            modules_regex = re.compile(
-                r"[-+] Installed Modules\s+((?:[+-]\s+.*(?:\n|$))+)",
-                re.MULTILINE
-            )
-            modules_match = modules_regex.search(full_text)
-            installed_modules_text = ""
-            if modules_match:
-                modules_block = modules_match.group(1)
-                # Extract module names before '(' or end of line
-                mods = re.findall(r"^[+-]\s+(.*?)(?:\(|$)", modules_block, re.MULTILINE)
-                # Clean them up
-                mod_names = [m.strip() for m in mods if m.strip()]
-                if mod_names:
-                    installed_modules_text = "\n".join(mod_names)
+                # Exception:
+                exception_regex = re.compile(
+                    r"[+-]\s*Exception\s+([\s\S]+?)(?="
+                    r"\n[+-]\s*(?:Enhanced Stacktrace|Installed Modules|Exception)"
+                    r"|\Z)",
+                    re.IGNORECASE
+                )
+                # Enhanced Stacktrace:
+                stacktrace_regex = re.compile(
+                    r"[+-]\s*Enhanced Stacktrace\s+([\s\S]+?)(?="
+                    r"\n[+-]\s*(?:Exception|Installed Modules|Enhanced Stacktrace)"
+                    r"|\Z)",
+                    re.IGNORECASE
+                )
+                # Installed Modules:
+                modules_regex = re.compile(
+                    r"[+-]\s*Installed Modules\s+([\s\S]+?)(?="
+                    r"\n[+-]\s*(?:Exception|Enhanced Stacktrace|Installed Modules)"
+                    r"|\Z)",
+                    re.IGNORECASE
+                )
 
-            return {
-                "exception": exception_text,
-                "enhanced_stacktrace": stacktrace_text,
-                "installed_modules": installed_modules_text
-            }
+                # Now extract text via these patterns
+                exception_match = exception_regex.search(full_text)
+                exception_text = exception_match.group(1).strip() if exception_match else ""
 
-    except Exception as e:
-        return {"error": f"Error fetching webpage: {e}"}
+                stacktrace_match = stacktrace_regex.search(full_text)
+                stacktrace_text = stacktrace_match.group(1).strip() if stacktrace_match else ""
 
+                modules_match = modules_regex.search(full_text)
+                installed_modules_text = ""
+                if modules_match:
+                    modules_block = modules_match.group(1)
+                    # We'll capture lines beginning with '+ ' or '- ', ignoring parentheses
+                    # so we just get the mod name or mod name + version:
+                    mods = re.findall(
+                        r"^[+-]\s+(.*?)(?:\(|$)",
+                        modules_block,
+                        re.MULTILINE
+                    )
+                    # Clean them up
+                    mod_names = [m.strip() for m in mods if m.strip()]
+                    if mod_names:
+                        installed_modules_text = "\n".join(mod_names)
+
+                return {
+                    "exception": exception_text,
+                    "enhanced_stacktrace": stacktrace_text,
+                    "installed_modules": installed_modules_text
+                }
+
+        except Exception as e:
+            return {"error": f"Error fetching webpage: {e}"}
 
     async def analyze_media(self, image_data: bytes) -> dict:
         """Analyze image bytes with pytesseract."""
@@ -147,7 +168,7 @@ async def fetch_webpage(self, url: str) -> dict:
         if not content:
             return []
 
-        CHUNK_SIZE = 1024 - 10  # 10 chars overhead for code block formatting, newlines, etc.
+        CHUNK_SIZE = 1024 - 10  # overhead for code block formatting etc.
         chunks = []
         start_idx = 0
         while start_idx < len(content):
@@ -157,23 +178,11 @@ async def fetch_webpage(self, url: str) -> dict:
             start_idx += CHUNK_SIZE
 
         embeds = []
-        total_chunks = len(chunks)
-
         for i, chunk_text in enumerate(chunks, start=1):
-            # For the first chunk of this section, show the section_name in the embed title
-            # For subsequent chunks, omit the title (or set it to "", if you prefer).
-            if i == 1:
-                embed_title = section_name
-            else:
-                embed_title = ""  # or None, but empty string = no visible title
-
-            embed = discord.Embed(
-                title=embed_title,
-                color=discord.Color.blue()
-            )
-            # Add the code-block chunk
+            embed_title = section_name if i == 1 else ""
+            embed = discord.Embed(title=embed_title, color=discord.Color.blue())
             embed.add_field(
-                name="",  # no field name so it's "seamless"
+                name="",
                 value=f"```{chunk_text}```",
                 inline=False
             )
@@ -225,7 +234,7 @@ async def fetch_webpage(self, url: str) -> dict:
         Command to analyze a crash report or an image link.
         Presents all sections in one message, multiple pages, each page can have multiple embeds.
         """
-        # If it's a crash report
+        # If it's a known crash report link
         if "report.butr.link" in url:
             data = await self.fetch_webpage(url)
             if "error" in data:
@@ -236,11 +245,8 @@ async def fetch_webpage(self, url: str) -> dict:
             mods_text = data.get("installed_modules", "")
 
             pages = self.build_pages(exception_text, stacktrace_text, mods_text)
-            # Each element in 'pages' is a list of embed objects
-
             if len(pages) == 1:
-                # Only one "page," so no need for next/prev
-                # But that page might have multiple embeds, so we can do:
+                # Single "page" (though possibly multiple embeds in that list)
                 return await ctx.send(embeds=pages[0])
 
             # Otherwise, use the paginator
@@ -248,7 +254,7 @@ async def fetch_webpage(self, url: str) -> dict:
             await ctx.send(embeds=pages[0], view=view)
 
         else:
-            # Otherwise, handle image analysis
+            # Otherwise, assume it's an image link to analyze with pytesseract
             try:
                 async with self.session.get(url) as response:
                     if response.status != 200:
@@ -305,8 +311,7 @@ async def fetch_webpage(self, url: str) -> dict:
 
                 return
 
-        # If no crash-report link, you could still handle attachments here, if desired
-        # (omitted for brevity)
+        # If no crash-report link is found, you could handle other logic/attachments here
 
 async def setup(bot):
     cog = MediaAnalyzer(bot)
