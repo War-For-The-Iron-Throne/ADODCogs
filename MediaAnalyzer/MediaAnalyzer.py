@@ -9,6 +9,9 @@ from io import BytesIO
 import aiohttp
 import re
 import copy
+import traceback
+import datetime
+import sys
 
 ###############################################################################
 # Helper Functions
@@ -25,8 +28,7 @@ def embed_size(embed: discord.Embed) -> int:
 def safe_line_split(text: str, max_len: int) -> list[str]:
     """
     Break 'text' into multiple lines, none of which exceed max_len.
-    (We do a naive chunking approach: if a line is too long,
-    we slice it and treat the remainder as another line.)
+    Naively chunk if a line is too long.
     """
     lines_out = []
     for raw_line in text.splitlines():
@@ -65,12 +67,9 @@ def build_embeds_for_section(
     # 1) Break the content into lines (each at most max_line_len chars)
     lines = safe_line_split(content, max_line_len)
 
-    # We'll accumulate lines in 'field_buffer' until adding another line
-    # would exceed max_field_chars, at which point we finalize that field
-    # and add it to the current embed.
     embeds = []
     current_embed = None
-    used_title = False  # to control if we show the section_name in subsequent embeds
+    used_title = False
     field_buffer = []
     fields_in_current_embed = 0
 
@@ -81,7 +80,6 @@ def build_embeds_for_section(
         return False to signal that we need a new embed first.
         """
         field_str = "\n".join(lines_for_field)
-        # Wrap in triple backticks:
         field_value = f"```{field_str}```"
 
         test_embed = copy.deepcopy(embed_obj)
@@ -93,7 +91,7 @@ def build_embeds_for_section(
         return False
 
     def push_current_embed():
-        """If the current embed has at least one field, store it in 'embeds'."""
+        """If the current embed has at least one field, store it."""
         if current_embed and len(current_embed.fields) > 0:
             if embed_size(current_embed) <= 6000:
                 embeds.append(current_embed)
@@ -105,10 +103,10 @@ def build_embeds_for_section(
     fields_in_current_embed = 0
 
     for line in lines:
-        # if adding this line to 'field_buffer' would exceed max_field_chars, finalize the existing field now
+        # If adding this line to 'field_buffer' would exceed max_field_chars,
+        # finalize the existing field now
         prospective_buffer = field_buffer + [line]
         if len("\n".join(prospective_buffer)) > max_field_chars:
-            # finalize the existing buffer
             if field_buffer:
                 # try adding as a field
                 if not finalize_field(current_embed, field_buffer):
@@ -120,7 +118,6 @@ def build_embeds_for_section(
                         current_embed.title = section_name
                         used_title = True
                     finalize_field(current_embed, field_buffer)
-                # reset field buffer
                 field_buffer.clear()
                 fields_in_current_embed = len(current_embed.fields)
 
@@ -133,11 +130,10 @@ def build_embeds_for_section(
                     used_title = True
                 fields_in_current_embed = 0
 
-        # now add the new line
+        # Now add the new line
         field_buffer.append(line)
-        # if we already have max_fields_per_embed, we need to finalize the buffer right away
-        if fields_in_current_embed >= max_fields_per_embed:
-            # finalize the buffer
+        # If we already have max_fields_per_embed fields, finalize the buffer right away
+        if len(current_embed.fields) >= max_fields_per_embed:
             if field_buffer:
                 if not finalize_field(current_embed, field_buffer):
                     push_current_embed()
@@ -149,20 +145,17 @@ def build_embeds_for_section(
                 field_buffer.clear()
                 fields_in_current_embed = len(current_embed.fields)
 
-            if fields_in_current_embed >= max_fields_per_embed:
+            if len(current_embed.fields) >= max_fields_per_embed:
                 push_current_embed()
                 current_embed = discord.Embed(color=discord.Color.blue())
                 if not used_title:
                     current_embed.title = section_name
                     used_title = True
-                fields_in_current_embed = 0
 
     # After the loop, if there's anything left in 'field_buffer', finalize it
     if field_buffer:
         if not finalize_field(current_embed, field_buffer):
-            # push old embed
             push_current_embed()
-            # new embed
             current_embed = discord.Embed(color=discord.Color.blue())
             if not used_title:
                 current_embed.title = section_name
@@ -207,7 +200,6 @@ class PaginatedEmbeds(View):
         return interaction.user.id == self.invoker_id
 
     async def update_message(self, interaction: discord.Interaction):
-        # We'll edit the original message with the new embeds
         await interaction.response.edit_message(
             embeds=self.pages[self.index],
             view=self
@@ -275,7 +267,6 @@ class MediaAnalyzer(commands.Cog):
                     r"Screenshot|Screenshot Data|Json Model Data)"
                 )
 
-                # Use regex to find each section
                 exception_regex = re.compile(
                     rf"[+-]\s*Exception\s+([\s\S]+?)(?=\n[+-]\s*{headings_pattern}|\Z)",
                     re.IGNORECASE
@@ -336,19 +327,27 @@ class MediaAnalyzer(commands.Cog):
           2) Combining them into a single list,
           3) Splitting them into pages of up to 10 embeds each.
         """
-        # Tweak these as needed
-        exc_embeds = build_embeds_for_section("Exception", exception_text,
-                                              max_line_len=80,
-                                              max_field_chars=900,
-                                              max_fields_per_embed=5)
-        stack_embeds = build_embeds_for_section("Enhanced Stacktrace", stacktrace_text,
-                                                max_line_len=80,
-                                                max_field_chars=900,
-                                                max_fields_per_embed=5)
-        mods_embeds = build_embeds_for_section("Installed Modules", installed_modules_text,
-                                               max_line_len=80,
-                                               max_field_chars=900,
-                                               max_fields_per_embed=5)
+        exc_embeds = build_embeds_for_section(
+            "Exception",
+            exception_text,
+            max_line_len=80,
+            max_field_chars=900,
+            max_fields_per_embed=5
+        )
+        stack_embeds = build_embeds_for_section(
+            "Enhanced Stacktrace",
+            stacktrace_text,
+            max_line_len=80,
+            max_field_chars=900,
+            max_fields_per_embed=5
+        )
+        mods_embeds = build_embeds_for_section(
+            "Installed Modules",
+            installed_modules_text,
+            max_line_len=80,
+            max_field_chars=900,
+            max_fields_per_embed=5
+        )
 
         all_embeds = exc_embeds + stack_embeds + mods_embeds
 
@@ -360,7 +359,6 @@ class MediaAnalyzer(commands.Cog):
             )
             return [[empty_embed]]
 
-        # Finally, chunk them into pages of up to 10
         pages = chunk_embeds(all_embeds, size=10)
         return pages
 
@@ -380,11 +378,19 @@ class MediaAnalyzer(commands.Cog):
             installed_text = data.get("installed_modules", "")
 
             pages = self.build_pages(exception_text, stacktrace_text, installed_text)
-            if len(pages) == 1:
-                return await ctx.send(embeds=pages[0])
-            else:
-                view = PaginatedEmbeds(pages, ctx.author.id)
-                await ctx.send(embeds=pages[0], view=view)
+            try:
+                if len(pages) == 1:
+                    await ctx.send(embeds=pages[0])
+                else:
+                    view = PaginatedEmbeds(pages, ctx.author.id)
+                    await ctx.send(embeds=pages[0], view=view)
+
+            except discord.HTTPException as e:
+                # If it's the size error, gather all debug info
+                if "Embed size exceeds" in str(e) or "50035" in str(e):
+                    await self.handle_embed_error(ctx, pages, e)
+                else:
+                    raise  # Some other HTTPException
         else:
             # Possibly an image link
             try:
@@ -426,13 +432,97 @@ class MediaAnalyzer(commands.Cog):
                 installed_text = data.get("installed_modules", "")
 
                 pages = self.build_pages(exception_text, stacktrace_text, installed_text)
-                if len(pages) == 1:
-                    await message.reply(embeds=pages[0])
-                else:
-                    view = PaginatedEmbeds(pages, message.author.id)
-                    await message.reply(embeds=pages[0], view=view)
+                try:
+                    if len(pages) == 1:
+                        await message.reply(embeds=pages[0])
+                    else:
+                        view = PaginatedEmbeds(pages, message.author.id)
+                        await message.reply(embeds=pages[0], view=view)
+                except discord.HTTPException as e:
+                    if "Embed size exceeds" in str(e) or "50035" in str(e):
+                        await self.handle_embed_error(message, pages, e)
+                    else:
+                        raise
                 return
-        # Otherwise do nothing
+
+    async def handle_embed_error(self, msg_or_ctx, pages, error: discord.HTTPException):
+        """
+        When an embed is too large (HTTPException 50035: 'Embed size exceeds...'),
+        collect ALL relevant info (user, channel, time, embed sizes, fields, JSON, etc.),
+        and send a fallback .txt file with the debug info.
+        """
+        # If 'msg_or_ctx' is a Context, we can get author/channel differently than if it's a Message
+        # Let's handle both cases:
+        if isinstance(msg_or_ctx, commands.Context):
+            channel = msg_or_ctx.channel
+            author = msg_or_ctx.author
+            guild_info = f"Guild: {msg_or_ctx.guild} (ID: {msg_or_ctx.guild.id if msg_or_ctx.guild else 'N/A'})"
+            message_content = f"Command message content: {msg_or_ctx.message.content}"
+        else:
+            # It's a discord.Message
+            channel = msg_or_ctx.channel
+            author = msg_or_ctx.author
+            guild_info = f"Guild: {msg_or_ctx.guild} (ID: {msg_or_ctx.guild.id if msg_or_ctx.guild else 'N/A'})"
+            message_content = f"Message content: {msg_or_ctx.content}"
+
+        # Build the debug log
+        now_str = datetime.datetime.utcnow().isoformat()
+        user_info = f"User: {author} (ID: {author.id})"
+        channel_info = f"Channel: {channel} (ID: {channel.id})"
+        time_info = f"Time (UTC): {now_str}"
+        error_info = f"Exception: {error}\nTraceback:\n{traceback.format_exc()}"
+        embed_debug_lines = []
+
+        # Let's enumerate each page, embed, and field, measure sizes
+        for page_idx, page_embeds in enumerate(pages):
+            page_line = f"\n\n=== Page {page_idx} (Total Embeds: {len(page_embeds)}) ===\n"
+            embed_debug_lines.append(page_line)
+            for emb_idx, emb in enumerate(page_embeds):
+                emb_size = embed_size(emb)
+                emb_title = emb.title or "No Title"
+                emb_line = f"  Embed #{emb_idx} | Title: '{emb_title}' | JSON size: {emb_size}"
+                embed_debug_lines.append(emb_line)
+                for fld_idx, fld in enumerate(emb.fields):
+                    field_len = len(fld.value)
+                    field_line = f"    Field #{fld_idx} length: {field_len}"
+                    embed_debug_lines.append(field_line)
+                # Also dump the entire embed JSON
+                emb_as_json = json.dumps(emb.to_dict(), indent=2)
+                embed_debug_lines.append(f"  Embed JSON:\n{emb_as_json}")
+
+        embed_debug_str = "\n".join(embed_debug_lines)
+
+        # Consolidate all info into one big string
+        file_contents = (
+            "====== EMBED ERROR (Exceeded 6000 chars) ======\n"
+            f"{user_info}\n{channel_info}\n{guild_info}\n"
+            f"{message_content}\n{time_info}\n\n"
+            f"{error_info}\n\n"
+            "====== Embeds Debug ======\n"
+            f"{embed_debug_str}\n"
+        )
+
+        # Make an in-memory text file
+        file_obj = BytesIO(file_contents.encode('utf-8'))
+        file_obj.name = "embed_error_log.txt"
+
+        # Send fallback
+        try:
+            await channel.send(
+                content=(
+                    "**ERROR**: An embed exceeded Discord's size limit (6000 JSON chars). "
+                    "A full debug log is attached."
+                ),
+                file=discord.File(file_obj)
+            )
+        except Exception as e2:
+            # If for some reason we can't even send a file, log to console
+            print(f"[FATAL] Could not send fallback file. Original error: {error}, fallback error: {e2}")
+            print(file_contents, file=sys.stderr)
+
+        # Also log to console
+        print("[EMBED SIZE ERROR] Could not send embed due to size limit.")
+        print(file_contents, file=sys.stderr)
 
 async def setup(bot):
     cog = MediaAnalyzer(bot)
